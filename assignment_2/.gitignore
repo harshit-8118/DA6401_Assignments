@@ -1,0 +1,6 @@
+venv
+archived
+data/annotations
+data/images
+test.py
+vgg.txt 

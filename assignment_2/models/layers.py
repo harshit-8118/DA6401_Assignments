@@ -36,5 +36,5 @@ if __name__ == "__main__":
     print("\n--- Evaluation Mode ---")
     dropout.eval()
     eval_out = dropout(sample_input)
-    # print(eval_out)
+    print(eval_out)
     # Notice the values are 1.0 (identity mapping)

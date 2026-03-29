@@ -14,11 +14,12 @@ class VGG11Encoder(nn.Module):
     VGG11-style encoder with optional intermediate feature returns.
     """
 
-    def __init__(self, in_channels: int = 3, classes: int = 37):
+    def __init__(self, in_channels: int = 3, num_classes: int = 37, dropout_p: float = 0.5):
         super(VGG11Encoder, self).__init__()
         self.enc1 = nn.Sequential(
             # -- conv_1 --
             nn.Conv2d(in_channels=in_channels, out_channels=64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)
         )
@@ -26,6 +27,7 @@ class VGG11Encoder(nn.Module):
         self.enc2 = nn.Sequential(
             # -- conv_2 --
             nn.Conv2d(in_channels=64, out_channels=128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)
         )
@@ -33,38 +35,34 @@ class VGG11Encoder(nn.Module):
         self.enc3 = nn.Sequential(
             # -- conv_3 --
             nn.Conv2d(in_channels=128, out_channels=256, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
+            # -- conv_4 --
+            nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)
         )
 
         self.enc4 = nn.Sequential(
-            # -- conv_4 --
-            nn.Conv2d(in_channels=256, out_channels=256, kernel_size=3, stride=1, padding=1),
+            # -- conv_5 --
+            nn.Conv2d(in_channels=256, out_channels=512, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(512),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels=512, out_channels=512, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)
         )
 
         self.enc5 = nn.Sequential(
-            # -- conv_5 --
-            nn.Conv2d(in_channels=256, out_channels=512, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-        )
-
-        self.enc6 = nn.Sequential(
-            # -- conv_6 --
-            nn.Conv2d(in_channels=512, out_channels=512, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)
-        )
-
-        self.enc7 = nn.Sequential(
             # -- conv_7 --
             nn.Conv2d(in_channels=512, out_channels=512, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
-        )
-
-        self.enc8 = nn.Sequential(
             # -- conv_8 --
             nn.Conv2d(in_channels=512, out_channels=512, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(512),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2, padding=0, dilation=1, ceil_mode=False)
         )
@@ -76,11 +74,11 @@ class VGG11Encoder(nn.Module):
             # classifier
             nn.Linear(in_features=7*7*512, out_features=4096, bias=True),
             nn.ReLU(inplace=True),
-            CustomDropout(p=0.5),
+            CustomDropout(p=dropout_p),
             nn.Linear(in_features=4096, out_features=4096, bias=True),
             nn.ReLU(inplace=True), 
-            CustomDropout(p=0.5),
-            nn.Linear(in_features=4096, out_features=classes, bias=True)
+            CustomDropout(p=dropout_p),
+            nn.Linear(in_features=4096, out_features=num_classes, bias=True)
         )
 
 
@@ -104,14 +102,11 @@ class VGG11Encoder(nn.Module):
         f3 = self.enc3(f2)
         f4 = self.enc4(f3)
         f5 = self.enc5(f4)
-        f6 = self.enc6(f5)
-        f7 = self.enc7(f6)
-        f8 = self.enc8(f7)
         
         out = self.head(f5)
 
         if return_features:
-            features = {"f1": f1, "f2": f2, "f3": f3, "f4": f4, "f5": f5, "f6": f6, "f7": f7, "f8": f8}
+            features = {"f1": f1, "f2": f2, "f3": f3, "f4": f4, "f5": f5}
             return out, features
         
         return out
@@ -120,11 +115,17 @@ class VGG11Encoder(nn.Module):
 
 if __name__ == '__main__':
     model = VGG11Encoder()
-    dummy_input = torch.randn(1, 3, 224, 224)
-    
+    dummy_input = torch.randn(1, 3, 256, 256)
+    print(model)
     # 1. Test Training Mode (Dropout Active)
     model.train()
     out_train = model(dummy_input)
+    print(out_train.shape)  # Should be [1, 37] 
+    out_train, features = model(dummy_input, return_features=True)
+    for f, v in features.items():
+        print(f"{f}: {v.shape}")  # Should show the shapes of the feature maps
+
+    print(model.head[4].p)  # Should show dropout probability (0.5)
     print("Train forward successful.")
     
     # 2. Test Eval Mode (Dropout Inactive)

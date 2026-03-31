@@ -102,8 +102,8 @@ def get_train_transforms(img_size: int = 224) -> A.Compose:
         A.Affine(
             scale=(0.8, 1.2),
             translate_percent={"x": (-0.12, 0.12), "y": (-0.12, 0.12)},
-            rotate=(-35, 35),
-            shear=(-20, 20),
+            rotate=(-15, 15),
+            shear=(-10, 10),
             border_mode=BORDER_REFLECT_101,
             p=0.75,
         ),
@@ -126,22 +126,22 @@ def get_train_transforms(img_size: int = 224) -> A.Compose:
         # GROUP 2: Photometric (image only)
         # ================================================================
 
-        A.OneOf([
-            A.RandomBrightnessContrast(brightness_limit=0.35, contrast_limit=0.35),
-            A.ColorJitter(brightness=0.35, contrast=0.35, saturation=0.35, hue=0.1),
-            A.HueSaturationValue(
-                hue_shift_limit=25, sat_shift_limit=45, val_shift_limit=35),
-        ], p=0.85),
+        # A.OneOf([
+        #     A.RandomBrightnessContrast(brightness_limit=0.35, contrast_limit=0.35),
+        #     A.ColorJitter(brightness=0.35, contrast=0.35, saturation=0.35, hue=0.1),
+        #     A.HueSaturationValue(
+        #         hue_shift_limit=25, sat_shift_limit=45, val_shift_limit=35),
+        # ], p=0.85),
 
-        A.RandomGamma(gamma_limit=(65, 140), p=0.35),
+        # A.RandomGamma(gamma_limit=(65, 140), p=0.35),
 
         # Local contrast enhancement — helps on low-contrast test images
-        A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=0.3),
+        # A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=0.3),
 
-        A.RGBShift(r_shift_limit=20, g_shift_limit=20, b_shift_limit=20, p=0.25),
+        # A.RGBShift(r_shift_limit=20, g_shift_limit=20, b_shift_limit=20, p=0.25),
 
         # Histogram equalisation — handles unusual global exposure
-        A.Equalize(p=0.1),
+        # A.Equalize(p=0.1),
 
         # ================================================================
         # GROUP 3: Degradation / noise (image only)
@@ -325,7 +325,7 @@ class OxfordIIITPetDataset(Dataset):
         bbox_cxcywh = _parse_bbox_xml(
             self.xmls_dir / f"{image_id}.xml", img_w, img_h)
         if bbox_cxcywh is None:
-            print(f"xml missing: {image_id}.xml")
+            # print(f"xml missing: {image_id}.xml")
             bbox_cxcywh = (0.5, 0.5, 1.0, 1.0)   # full-image fallback
 
         # ---- Apply albumentations (image + mask + bbox jointly) ----

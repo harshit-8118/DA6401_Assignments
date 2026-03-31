@@ -69,7 +69,7 @@ class VGG11Encoder(nn.Module):
 
         self.head = nn.Sequential(
             # avg pool layer
-            nn.AdaptiveAvgPool2d(output_size=(7, 7)),
+            # nn.AdaptiveAvgPool2d(output_size=(7, 7)),
             nn.Flatten(),
             # classifier
             nn.Linear(in_features=7*7*512, out_features=4096, bias=True),
@@ -125,7 +125,7 @@ if __name__ == '__main__':
     for f, v in features.items():
         print(f"{f}: {v.shape}")  # Should show the shapes of the feature maps
 
-    print(model.head[4].p)  # Should show dropout probability (0.5)
+    print(model.head[3].p)  # Should show dropout probability (0.5)
     print("Train forward successful.")
     
     # 2. Test Eval Mode (Dropout Inactive)

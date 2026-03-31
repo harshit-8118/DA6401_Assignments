@@ -42,6 +42,7 @@ from torch.utils.data import DataLoader, random_split
 from sklearn.metrics import (
     accuracy_score, f1_score, precision_score, recall_score,
 )
+from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 import wandb
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "models"))
@@ -49,8 +50,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "models"))
 from models.classification import VGG11Classifier
 from models.localization   import VGG11Localizer
 from models.segmentation   import VGG11UNet
-from losses.iou_loss              import IoULoss
-from data.pets_dataset          import OxfordIIITPetDataset, get_train_transforms, get_val_transforms
+from losses.iou_loss import IoULoss
+from data.pets_dataset import OxfordIIITPetDataset, get_train_transforms, get_val_transforms
 
 # --------------------------------------------------------------------------- #
 #  Constants                                                                   #
@@ -58,9 +59,11 @@ from data.pets_dataset          import OxfordIIITPetDataset, get_train_transform
 
 IMG_SIZE   = 224
 NUM_BREEDS = 37
-CKPT_CLF   = "classifier.pth"
-CKPT_LOC   = "localizer.pth"
-CKPT_SEG   = "unet.pth"
+os.makedirs("checkpoints", exist_ok=True)
+
+CKPT_CLF   = os.path.join("checkpoints", "classifier.pth")
+CKPT_LOC   = os.path.join("checkpoints", "localizer.pth")
+CKPT_SEG   = os.path.join("checkpoints", "unet.pth")
 
 
 # --------------------------------------------------------------------------- #
@@ -80,7 +83,7 @@ def set_seed(seed: int = 42):
 
 
 def get_device() -> torch.device:
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
 
 # --------------------------------------------------------------------------- #
@@ -104,7 +107,7 @@ def load_backbone_from_classifier(model, clf_path: str, encoder_attr: str = "enc
     if not os.path.exists(clf_path):
         print(f"  [backbone] {clf_path} not found — random init")
         return
-    ckpt = torch.load(clf_path, map_location="cpu")
+    ckpt = torch.load(clf_path, map_location="cpu", weights_only=True)
     sd   = ckpt.get("state_dict", ckpt)
     enc  = getattr(model, encoder_attr)
     remapped = {
@@ -244,6 +247,14 @@ def wandb_log(metrics: dict, use_wandb: bool):
 # --------------------------------------------------------------------------- #
 #  Task 1: Classification                                                      #
 # --------------------------------------------------------------------------- #
+def init_weights(m):
+    if isinstance(m, nn.Conv2d):
+        nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+        if m.bias is not None:
+            nn.init.constant_(m.bias, 0)
+    elif isinstance(m, nn.Linear):
+        nn.init.normal_(m.weight, 0, 0.01)
+        nn.init.constant_(m.bias, 0)
 
 def train_classifier(args):
     print(f"\n{'='*60}\nTASK 1: Classification\n{'='*60}")
@@ -256,27 +267,39 @@ def train_classifier(args):
     train_loader, val_loader, test_loader = make_loaders(args)
 
     model     = VGG11Classifier(num_classes=NUM_BREEDS, dropout_p=args.dropout_p).to(device)
+    # applying kaiming init to the classifier head only (encoder will be loaded from checkpoint)
+    model.apply(init_weights)
+
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.clf_lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.clf_epochs, eta_min=1e-6)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.clf_lr, weight_decay=0)
+
+    warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=5)
+    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=args.clf_epochs - 5)
+    scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[5])
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.clf_epochs, eta_min=1e-6)
 
     best_f1 = 0.0
-
     for epoch in range(1, args.clf_epochs + 1):
         # ---- Train ----
         model.train()
         t_loss = 0.0
         t_preds, t_labels = [], []
 
+        scaler = torch.amp.GradScaler('cuda')  # for mixed precision training (optional)
         for imgs, labels, _, _ in train_loader:
             imgs, labels = imgs.to(device), labels.to(device)
             optimizer.zero_grad()
-            logits = model(imgs)
-            loss   = criterion(logits, labels)
-            loss.backward()
+
+            with torch.amp.autocast('cuda'):
+                logits = model(imgs)
+                loss   = criterion(logits, labels)
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            # loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             t_loss += loss.item()
             t_preds.extend(logits.argmax(1).cpu().tolist())
             t_labels.extend(labels.cpu().tolist())
@@ -331,7 +354,7 @@ def train_classifier(args):
             save_checkpoint(CKPT_CLF, model, epoch, best_f1)
 
     # ---- Test (final evaluation only) ----
-    ckpt  = torch.load(CKPT_CLF, map_location=device)
+    ckpt  = torch.load(CKPT_CLF, map_location=device, weights_only=True)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
     te_loss = 0.0
@@ -408,7 +431,6 @@ def train_localizer(args):
         # ---- Train ----
         model.train()
         t_mse, t_iou_loss, t_total, t_iou_metric = 0., 0., 0., 0.
-
         for imgs, _, bboxes_norm, _ in train_loader:
             imgs        = imgs.to(device)
             bboxes_norm = bboxes_norm.to(device)        # [0,1] normalised
@@ -480,7 +502,7 @@ def train_localizer(args):
             save_checkpoint(CKPT_LOC, model, epoch, best_iou)
 
     # ---- Test ----
-    ckpt = torch.load(CKPT_LOC, map_location=device)
+    ckpt = torch.load(CKPT_LOC, map_location=device, weights_only=True)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
     te_mse, te_iou_loss, te_total, te_iou_metric = 0., 0., 0., 0.
@@ -659,7 +681,7 @@ def train_segmentation(args):
             save_checkpoint(CKPT_SEG, model, epoch, best_dice)
 
     # ---- Test ----
-    ckpt = torch.load(CKPT_SEG, map_location=device)
+    ckpt = torch.load(CKPT_SEG, map_location=device, weights_only=True)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
     te_loss = 0.0
@@ -713,15 +735,15 @@ def parse_args():
     p = argparse.ArgumentParser(description="DA6401 Assignment-2 Training")
 
     p.add_argument("--data_root",     type=str,   default="./data/oxford-iiit-pet/")
+    p.add_argument("--num_workers", type=int, default=2)
     p.add_argument("--task",          type=str,   default="clf",
                    choices=["all", "clf", "loc", "seg"])
-    p.add_argument("--batch_size",    type=int,   default=32)
-    p.add_argument("--dropout_p",     type=float, default=0.5)
-    p.add_argument("--num_workers",   type=int,   default=2)
+    p.add_argument("-b", "--batch_size",    type=int,   default=64)
+    p.add_argument("-dp", "--dropout_p",     type=float, default=0.5)
     p.add_argument("--seed",          type=int,   default=42)
 
-    p.add_argument("--clf_lr",        type=float, default=1e-3)
-    p.add_argument("--clf_epochs",    type=int,   default=30)
+    p.add_argument("--clf_lr",        type=float, default=1e-4)
+    p.add_argument("--clf_epochs",    type=int,   default=70)
 
     p.add_argument("--loc_lr",        type=float, default=1e-3)
     p.add_argument("--loc_epochs",    type=int,   default=30)

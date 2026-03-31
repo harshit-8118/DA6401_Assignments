@@ -171,11 +171,11 @@ def audit(data_root: str):
         print(f"    Missing XMLs    : {len(missing_xml)}")
 
         if missing_img:
-            print(f"    -> missing image examples : {missing_img[:5]}")
+            print(f"    -> missing image examples : {missing_img[:10]}")
         if missing_mask:
-            print(f"    -> missing trimap examples: {missing_mask[:5]}")
+            print(f"    -> missing trimap examples: {missing_mask[:10]}")
         if missing_xml:
-            print(f"    -> missing XML examples   : {missing_xml[:5]}")
+            print(f"    -> missing XML examples   : {missing_xml[:10]}")
             if split_name == "test":
                 print("    *** TEST XMLs are INTENTIONALLY absent in the official")
                 print("        Oxford-IIIT Pet release. Use full-image bbox fallback")

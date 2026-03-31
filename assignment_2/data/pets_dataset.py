@@ -252,19 +252,13 @@ class OxfordIIITPetDataset(Dataset):
         split: str = "trainval",
         transform: Optional[A.Compose] = None,
         img_size: int = 224,
-        download: bool = False,
     ) -> None:
         assert split in ("trainval", "test"), \
             f"split must be 'trainval' or 'test', got '{split}'"
 
-        self.root     = pathlib.Path(root) / "oxford-iiit-pet"
+        self.root     = pathlib.Path(root)
         self.split    = split
         self.img_size = img_size
-
-        if download:
-            import torchvision
-            torchvision.datasets.OxfordIIITPet(
-                root=root, split=split, download=True)
 
         self.images_dir = self.root / "images"
         self.masks_dir  = self.root / "annotations" / "trimaps"
@@ -331,6 +325,7 @@ class OxfordIIITPetDataset(Dataset):
         bbox_cxcywh = _parse_bbox_xml(
             self.xmls_dir / f"{image_id}.xml", img_w, img_h)
         if bbox_cxcywh is None:
+            print(f"xml missing: {image_id}.xml")
             bbox_cxcywh = (0.5, 0.5, 1.0, 1.0)   # full-image fallback
 
         # ---- Apply albumentations (image + mask + bbox jointly) ----
@@ -361,9 +356,16 @@ class OxfordIIITPetDataset(Dataset):
 
 if __name__ == "__main__":
     import sys
+    import os 
     from torch.utils.data import DataLoader
 
-    root = sys.argv[1] if len(sys.argv) > 1 else "/"
+    # Get the directory where pets_dataset.py actually lives
+    current_file_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Default to the folder sitting right next to this script
+    default_path = os.path.join(current_file_dir, "oxford-iiit-pet")
+
+    root = sys.argv[1] if len(sys.argv) > 1 else default_path
 
     try:
         ds = OxfordIIITPetDataset(root=root, split="trainval")

@@ -4,3 +4,4 @@ data/oxford-iiit-pet
 test.py
 vgg.txt 
 wandb/
+*.pth 

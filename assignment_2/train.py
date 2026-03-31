@@ -712,7 +712,7 @@ def train_segmentation(args):
 def parse_args():
     p = argparse.ArgumentParser(description="DA6401 Assignment-2 Training")
 
-    p.add_argument("--data_root",     type=str,   default="./data")
+    p.add_argument("--data_root",     type=str,   default="./data/oxford-iiit-pet/")
     p.add_argument("--task",          type=str,   default="clf",
                    choices=["all", "clf", "loc", "seg"])
     p.add_argument("--batch_size",    type=int,   default=32)
@@ -731,7 +731,7 @@ def parse_args():
     p.add_argument("--seg_classes",   type=int,   default=3, choices=[1, 3],
                    help="1=binary fg/rest, 3=full trimap {fg,bg,boundary}")
 
-    p.add_argument("--wandb_project", type=str,   default="da6401-assignment2")
+    p.add_argument("--wandb_project", type=str,   default="DA6402-Assignment-2_v1")
     p.add_argument("--use_wandb",     action="store_true",
                    help="Enable Weights & Biases logging")
 

@@ -115,7 +115,7 @@ class VGG11Encoder(nn.Module):
 
 if __name__ == '__main__':
     model = VGG11Encoder()
-    dummy_input = torch.randn(1, 3, 256, 256)
+    dummy_input = torch.randn(1, 3, 224, 224)
     print(model)
     # 1. Test Training Mode (Dropout Active)
     model.train()

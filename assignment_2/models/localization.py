@@ -14,9 +14,9 @@ class RegressionHead(nn.Module):
         self.flatten = nn.Flatten()
         self.fc = nn.Sequential(    
             nn.Linear(512 * 7 * 7, 1024, bias=True),
-            nn.ReLU(),
+            nn.ReLU(inplace=True),
             nn.Linear(1024, 4, bias=True),
-            nn.Sigmoid()
+            nn.ReLU(inplace=True), 
         )
 
     def forward(self, f5: torch.Tensor) -> torch.Tensor:
@@ -32,9 +32,9 @@ class RegressionHead(nn.Module):
 class VGG11Localizer(nn.Module):
     """VGG11-based localizer."""
 
-    def __init__(self, in_channels: int = 3, num_classes: int = 4, freeze_backbone: bool = True):
+    def __init__(self, in_channels: int = 3, num_classes: int = 4, dropout_p: float = 0.5, freeze_backbone: bool = True):
         super(VGG11Localizer, self).__init__()
-        self.encoder = VGG11Encoder(in_channels=in_channels, num_classes=num_classes)
+        self.encoder = VGG11Encoder(in_channels=in_channels, num_classes=num_classes, dropout_p=dropout_p)
         
         if freeze_backbone:
             for param in self.encoder.parameters():

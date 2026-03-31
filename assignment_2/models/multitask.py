@@ -3,24 +3,27 @@
 
 import torch
 import torch.nn as nn
-from vgg11 import VGG11Encoder
-from localization import VGG11Localizer
-from segmentation import VGG11UNet
 
 class MultiTaskPerceptionModel(nn.Module):
     """Shared-backbone multi-task model."""
 
-    def __init__(self, num_breeds: int = 37, seg_classes: int = 3, in_channels: int = 3, dropout_p: float = 0.5):
-        super(MultiTaskPerceptionModel, self).__init__()
-        # Shared VGG11 backbone
-        self.vgg11 = VGG11Encoder(in_channels=in_channels, num_classes=num_breeds, dropout_p=dropout_p)
-        # Task-specific heads
-        self.localizer = VGG11Localizer(in_channels=in_channels, num_classes=4, freeze_backbone=True)
-        self.vgg11_unet = VGG11UNet(num_classes=seg_classes, in_channels=in_channels, num_filters=32)
-
+    def __init__(self, num_breeds: int = 37, seg_classes: int = 3, in_channels: int = 3, classifier_path: str = "classifier.pth", localizer_path: str = "localizer.pth", unet_path: str = "unet.pth"):
+        """
+        Initialize the shared backbone/heads using these trained weights.
+        Args:
+            num_breeds: Number of output classes for classification head.
+            seg_classes: Number of output classes for segmentation head.
+            in_channels: Number of input channels.
+            classifier_path: Path to trained classifier weights.
+            localizer_path: Path to trained localizer weights.
+            unet_path: Path to trained unet weights.
+        """
+        pass
 
     def forward(self, x: torch.Tensor):
         """Forward pass for multi-task model.
+        Args:
+            x: Input tensor of shape [B, in_channels, H, W].
         Returns:
             A dict with keys:
             - 'classification': [B, num_breeds] logits tensor.
@@ -28,22 +31,4 @@ class MultiTaskPerceptionModel(nn.Module):
             - 'segmentation': [B, seg_classes, H, W] segmentation logits tensor
         """
         # TODO: Implement forward pass.
-
-        cls_logits = self.vgg11(x)
-        bbox = self.localizer(x)
-        seg_logits = self.vgg11_unet(x)
-
-        return {
-            "classification": cls_logits,
-            "localization":   bbox,
-            "segmentation":   seg_logits,
-        }
-
-
-if __name__ == "__main__":
-    model = MultiTaskPerceptionModel(num_breeds=37, seg_classes=3, in_channels=3, dropout_p=0.5)
-    x = torch.randn(1, 3, 256, 256)
-    outputs = model(x)
-    print("Classification output shape:", outputs["classification"].shape)
-    print("Localization output shape:", outputs["localization"].shape)
-    print("Segmentation output shape:", outputs["segmentation"].shape)
+        raise NotImplementedError("Implement MultiTaskPerceptionModel.forward")

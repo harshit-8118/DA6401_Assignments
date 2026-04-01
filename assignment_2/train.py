@@ -270,8 +270,8 @@ def train_classifier(args):
     # applying kaiming init to the classifier head only (encoder will be loaded from checkpoint)
     model.apply(init_weights)
 
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.clf_lr, weight_decay=0)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.15)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.clf_lr, weight_decay=1e-5)
 
     warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=5)
     cosine_scheduler = CosineAnnealingLR(optimizer, T_max=args.clf_epochs - 5)

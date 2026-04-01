@@ -52,147 +52,71 @@ IMAGENET_STD  = (0.229, 0.224, 0.225)
 # --------------------------------------------------------------------------- #
 #  Transforms                                                                  #
 # --------------------------------------------------------------------------- #
-
 def get_train_transforms(img_size: int = 224) -> A.Compose:
-    """Rigorous augmentation pipeline for training.
-
-    Group 1 — Spatial/geometric (applied jointly to image + mask + bbox):
-      RandomResizedCrop : partial crops and zoom variation (scale 50-100%)
-      HorizontalFlip    : mirror views
-      Affine            : rotation ±35°, shear ±20°, scale 0.8-1.2,
-                          translation ±12% — covers shear + elongation tests
-      Perspective       : off-axis viewpoint warp
-      ElasticTransform  : non-rigid deformation
-      GridDistortion    : additional non-linear spatial warp
-
-    Group 2 — Photometric (image only):
-      OneOf[BrightnessContrast / ColorJitter / HueSaturationValue]
-      RandomGamma, CLAHE, RGBShift, Equalize
-
-    Group 3 — Degradation (image only):
-      OneOf[GaussianBlur / MotionBlur / MedianBlur]
-      GaussNoise, ISONoise, ImageCompression, CoarseDropout (occlusion)
+    """Clean, generalizing augmentation for fine-grained pet classification.
+ 
+    Philosophy: mild geometric + mild colour. Preserve discriminative features.
+    With pretrained backbone, less augmentation generalizes better.
     """
     bbox_p = A.BboxParams(
-        format="yolo",             # (cx, cy, w, h) normalised
-        label_fields=["bbox_labels"],
-        clip=True,
-        min_visibility=0.3,
+        format="yolo", label_fields=["bbox_labels"],
+        clip=True, min_visibility=0.3,
     )
-
     return A.Compose([
-
-        # ================================================================
-        # GROUP 1: Spatial / geometric
-        # ================================================================
-
-        # Simulate cropped / zoomed inputs; random aspect ratio 3:4 to 4:3
+ 
+        # ------------------------------------------------------------------
+        # Spatial: mild crop (0.7-1.0 keeps most of the pet in frame)
+        # Aggressive scale like 0.5 crops out the head — the most
+        # discriminative region for breed identification.
+        # ------------------------------------------------------------------
         A.RandomResizedCrop(
             size=(img_size, img_size),
-            scale=(0.5, 1.0),
-            ratio=(0.75, 1.33),
+            scale=(0.7, 1.0),       # was (0.5, 1.0) — too aggressive
+            ratio=(0.85, 1.18),     # near-square crops only
             p=1.0,
         ),
-
+ 
+        # Free augmentation — pets are photographed from both sides
         A.HorizontalFlip(p=0.5),
-
-        # Rotation + shear + scale + translation in one transform.
-        # shear=±20° directly handles "shear" and "elongation" test cases.
-        # border_mode=4 (REFLECT_101) avoids black border artifacts.
-        A.Affine(
-            scale=(0.8, 1.2),
-            translate_percent={"x": (-0.12, 0.12), "y": (-0.12, 0.12)},
-            rotate=(-15, 15),
-            shear=(-10, 10),
-            border_mode=BORDER_REFLECT_101,
-            p=0.75,
+ 
+        # Mild rotation only — breed features are orientation-sensitive
+        # removed shear entirely — shear distorts fur patterns
+        A.Rotate(limit=15, border_mode=BORDER_REFLECT_101, p=0.3),
+ 
+        # ------------------------------------------------------------------
+        # Colour: mild jitter to handle lighting variation
+        # Keep values low — colour IS discriminative for breeds
+        # (e.g. orange tabby vs grey tabby are different breeds)
+        # ------------------------------------------------------------------
+        A.ColorJitter(
+            brightness=0.2, contrast=0.2,
+            saturation=0.2, hue=0.05,
+            p=0.5,
         ),
-
-        # Perspective warp: simulates camera angle / viewpoint change
-        A.Perspective(scale=(0.04, 0.14), p=0.35),
-
-        # Elastic deformation: non-rigid warp (fur, body shape variation)
-        A.ElasticTransform(
-            alpha=50,
-            sigma=6,
-            border_mode=BORDER_REFLECT_101,
-            p=0.25,
-        ),
-
-        # Grid distortion: another non-linear spatial warp
-        A.GridDistortion(num_steps=5, distort_limit=0.25, p=0.2),
-
-        # ================================================================
-        # GROUP 2: Photometric (image only)
-        # ================================================================
-
-        # A.OneOf([
-        #     A.RandomBrightnessContrast(brightness_limit=0.35, contrast_limit=0.35),
-        #     A.ColorJitter(brightness=0.35, contrast=0.35, saturation=0.35, hue=0.1),
-        #     A.HueSaturationValue(
-        #         hue_shift_limit=25, sat_shift_limit=45, val_shift_limit=35),
-        # ], p=0.85),
-
-        # A.RandomGamma(gamma_limit=(65, 140), p=0.35),
-
-        # Local contrast enhancement — helps on low-contrast test images
-        # A.CLAHE(clip_limit=4.0, tile_grid_size=(8, 8), p=0.3),
-
-        # A.RGBShift(r_shift_limit=20, g_shift_limit=20, b_shift_limit=20, p=0.25),
-
-        # Histogram equalisation — handles unusual global exposure
-        # A.Equalize(p=0.1),
-
-        # ================================================================
-        # GROUP 3: Degradation / noise (image only)
-        # ================================================================
-
-        A.OneOf([
-            A.GaussianBlur(blur_limit=(3, 9)),    # defocus blur
-            A.MotionBlur(blur_limit=(3, 11)),     # camera shake
-            A.MedianBlur(blur_limit=7),           # impulse noise smoothing
-        ], p=0.45),
-
-        A.GaussNoise(p=0.35),
-
-        # ISO noise: camera sensor noise with a colour component
-        A.ISONoise(color_shift=(0.01, 0.06), intensity=(0.1, 0.5), p=0.25),
-
-        # JPEG compression artefacts (common in internet-scraped images)
-        A.ImageCompression(quality_range=(50, 95), p=0.25),
-
-        # Coarse Dropout (Cutout): rectangular occlusion patches.
-        # fill=0 keeps dropped region black; fill_mask leaves mask labels intact.
-        A.CoarseDropout(
-            num_holes_range=(4, 10),
-            hole_height_range=(12, 36),
-            hole_width_range=(12, 36),
-            fill=0,
-            p=0.35,
-        ),
-
-        # ================================================================
-        # Normalise + convert to tensor
-        # ================================================================
+ 
+        # Mild blur — simulates slightly out-of-focus photos
+        # ONE transform, LOW probability — not stacked
+        A.GaussianBlur(blur_limit=(3, 5), p=0.1),
+ 
+        # ------------------------------------------------------------------
+        # Normalize + tensor
+        # ------------------------------------------------------------------
         A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ToTensorV2(),
-
+ 
     ], bbox_params=bbox_p)
-
-
+ 
+ 
 def get_val_transforms(img_size: int = 224) -> A.Compose:
-    """Deterministic resize + normalise for validation / test."""
+    """Deterministic: resize + normalize only."""
     return A.Compose([
         A.Resize(img_size, img_size),
         A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
         ToTensorV2(),
     ], bbox_params=A.BboxParams(
-        format="yolo",
-        label_fields=["bbox_labels"],
-        clip=True,
-        min_visibility=0.3,
+        format="yolo", label_fields=["bbox_labels"],
+        clip=True, min_visibility=0.3,
     ))
-
 
 # --------------------------------------------------------------------------- #
 #  Helper: parse Pascal VOC XML bounding box                                   #

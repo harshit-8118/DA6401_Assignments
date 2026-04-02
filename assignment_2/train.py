@@ -1,40 +1,8 @@
-"""train.py — Sequential training for DA6401 Assignment-2.
-
-Tasks:
-  Task 1: VGG11Classifier  -> classifier.pth
-  Task 2: VGG11Localizer   -> localizer.pth  (backbone from classifier.pth)
-  Task 3: VGG11UNet        -> unet.pth       (encoder  from classifier.pth)
-
-Data splits:
-  trainval.txt -> 90% train / 10% val  (random split, seeded)
-  test.txt     -> held-out test set    (inference / final evaluation only)
-
-Segmentation decision (--seg_classes):
-  3  -> CrossEntropyLoss on all trimap classes {0=fg, 1=bg, 2=boundary}
-        Richer supervision; boundary class explicitly learned.
-  1  -> BCEWithLogitsLoss, binary fg vs rest
-        Simpler; matches VGG11UNet(num_classes=1) default.
-  Default: 3  (recommended — full trimap supervision)
-
-Localizer bbox convention:
-  Dataset returns normalised (cx,cy,w,h) in [0,1].
-  Localizer outputs pixel-space (cx,cy,w,h) — no sigmoid in RegressionHead.
-  MSE loss computed on pixel-space values.
-  IoU  loss computed on normalised values (divide pred by IMG_SIZE, clamp [0,1]).
-  IoULoss always receives values in [0,1] -> range guaranteed.
-
-Usage:
-  python train.py --data_root ./data --task all --use_wandb
-  python train.py --data_root ./data --task clf --clf_epochs 30 --use_wandb
-  python train.py --data_root ./data --task loc --use_wandb
-  python train.py --data_root ./data --task seg --seg_classes 3 --use_wandb
-"""
-
 import argparse
 import os
 import random
 import sys
-
+import pathlib
 import numpy as np
 import torch
 import torch.nn as nn
@@ -52,10 +20,7 @@ from models.localization   import VGG11Localizer
 from models.segmentation   import VGG11UNet
 from losses.iou_loss import IoULoss
 from data.pets_dataset import OxfordIIITPetDataset, get_train_transforms, get_val_transforms
-
-# --------------------------------------------------------------------------- #
-#  Constants                                                                   #
-# --------------------------------------------------------------------------- #
+from data.stratified_split import get_stratified_split
 
 IMG_SIZE   = 224
 NUM_BREEDS = 37
@@ -65,18 +30,13 @@ CKPT_CLF   = os.path.join("checkpoints", "classifier.pth")
 CKPT_LOC   = os.path.join("checkpoints", "localizer.pth")
 CKPT_SEG   = os.path.join("checkpoints", "unet.pth")
 
-
-# --------------------------------------------------------------------------- #
-#  Reproducibility                                                             #
-# --------------------------------------------------------------------------- #
-
 def set_seed(seed: int = 42):
     """Fix seed at hardware level for full reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    # deterministic cuDNN (slight speed cost, full reproducibility)
+    
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark     = False
     os.environ["PYTHONHASHSEED"] = str(seed)
@@ -85,10 +45,6 @@ def set_seed(seed: int = 42):
 def get_device() -> torch.device:
     return torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
 
-
-# --------------------------------------------------------------------------- #
-#  Checkpoint helpers                                                          #
-# --------------------------------------------------------------------------- #
 
 def save_checkpoint(path: str, model: nn.Module, epoch: int, best_metric: float):
     torch.save({
@@ -100,10 +56,6 @@ def save_checkpoint(path: str, model: nn.Module, epoch: int, best_metric: float)
 
 
 def load_backbone_from_classifier(model, clf_path: str, encoder_attr: str = "encoder"):
-    """Transfer enc1..enc5 weights from saved VGG11Classifier into model.encoder.
-
-    VGG11Classifier keys: 'classifier.enc*'  ->  target: 'enc*'
-    """
     if not os.path.exists(clf_path):
         print(f"  [backbone] {clf_path} not found — random init")
         return
@@ -120,58 +72,76 @@ def load_backbone_from_classifier(model, clf_path: str, encoder_attr: str = "enc
           f"missing={len(missing)} unexpected={len(unexpected)}")
 
 
-# --------------------------------------------------------------------------- #
-#  DataLoaders                                                                 #
-# --------------------------------------------------------------------------- #
-
 def make_loaders(args):
-    """
-    trainval.txt -> 90% train / 10% val  (random split, seeded)
-    test.txt     -> test  (held-out, used only for final evaluation)
-    """
-    full_train = OxfordIIITPetDataset(
-        root=args.data_root, split="trainval",
-        transform=get_train_transforms(IMG_SIZE),
+    from data.pets_dataset import (OxfordIIITPetDataset,
+                                    get_train_transforms,
+                                    get_val_transforms)
+    root     = pathlib.Path(args.data_root)
+    ann_file = root / "annotations" / "trainval.txt"   
+    
+    train_records, val_records = get_stratified_split(
+        ann_file, val_frac=0.1, seed=args.seed)
+    
+    train_ds = OxfordIIITPetDataset(
+        root        = args.data_root,
+        records     = _expand_aug_records(train_records, root),
+        images_dir  = root / "images_aug",
+        masks_dir   = root / "annotations" / "trimaps_aug",
+        transform   = get_train_transforms(IMG_SIZE),
     )
-    full_train_no_aug = OxfordIIITPetDataset(
-        root=args.data_root, split="trainval",
-        transform=get_val_transforms(IMG_SIZE),   # no aug for val subset
+ 
+    val_ds = OxfordIIITPetDataset(
+        root        = args.data_root,
+        records     = val_records,
+        images_dir  = root / "images",
+        masks_dir   = root / "annotations" / "trimaps",
+        transform   = get_val_transforms(IMG_SIZE),
     )
+ 
     test_ds = OxfordIIITPetDataset(
-        root=args.data_root, split="test",
-        transform=get_val_transforms(IMG_SIZE),
+        root      = args.data_root,
+        split     = "test",
+        transform = get_val_transforms(IMG_SIZE),
     )
-
-    n_total = len(full_train)
-    n_val   = max(1, int(0.1 * n_total))
-    n_train = n_total - n_val
-
-    # Use a fixed generator so the split is reproducible
-    gen = torch.Generator().manual_seed(args.seed)
-    train_idx, val_idx = random_split(
-        range(n_total), [n_train, n_val], generator=gen)
-
-    # Subset with augmentation for train, no augmentation for val
-    from torch.utils.data import Subset
-    train_ds = Subset(full_train,        list(train_idx))
-    val_ds   = Subset(full_train_no_aug, list(val_idx))
-
-    kw = dict(num_workers=args.num_workers, pin_memory=(args.device.type == "cuda"))
-
+ 
+    kw = dict(num_workers=args.num_workers,
+              pin_memory=(args.device.type == "cuda"))
+ 
+    print(len(train_ds), len(val_ds), len(test_ds))
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
                               shuffle=True,  drop_last=True,  **kw)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size,
                               shuffle=False, drop_last=False, **kw)
     test_loader  = DataLoader(test_ds,  batch_size=args.batch_size,
                               shuffle=False, drop_last=False, **kw)
-
+ 
     print(f"  Train: {len(train_ds)} | Val: {len(val_ds)} | Test: {len(test_ds)}")
+    print(f"  Train IDs: {len(train_records)} originals "
+          f"+ their aug copies in images_aug/")
+    print(f"  Val   IDs: {len(val_records)} originals only "
+          f"(NEVER seen during training)")
     return train_loader, val_loader, test_loader
+ 
+ 
+def _expand_aug_records(original_records, root):
+    """For each original record, include it + its aug copies that exist on disk.
+ 
+    Reads images_aug/ to find *_aug1.jpg .. *_aug4.jpg for each image_id.
+    Only includes copies that were actually generated.
+    """
+    images_aug = root / "images_aug"
+    expanded   = []
+    for image_id, cls_id, species, breed in original_records:
+        
+        if (images_aug / f"{image_id}.jpg").exists():
+            expanded.append((image_id, cls_id, species, breed))
+        
+        for k in range(1, 5):
+            aug_id = f"{image_id}_aug{k}"
+            if (images_aug / f"{aug_id}.jpg").exists():
+                expanded.append((aug_id, cls_id, species, breed))
+    return expanded
 
-
-# --------------------------------------------------------------------------- #
-#  Metric helpers                                                              #
-# --------------------------------------------------------------------------- #
 
 def clf_metrics(all_preds: list, all_labels: list) -> dict:
     """Full classification metrics from collected batch lists."""
@@ -215,7 +185,7 @@ def seg_metrics(pred_mask: torch.Tensor, tgt_mask: torch.Tensor,
 
     px_acc = (pred_mask == tgt_mask).float().mean().item()
 
-    # Dice per class
+    
     dice_per_class = []
     for c in range(num_classes):
         p_c = (pred_mask == c).float()
@@ -244,9 +214,6 @@ def wandb_log(metrics: dict, use_wandb: bool):
         wandb.log(metrics)
 
 
-# --------------------------------------------------------------------------- #
-#  Task 1: Classification                                                      #
-# --------------------------------------------------------------------------- #
 def init_weights(m):
     if isinstance(m, nn.Conv2d):
         nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
@@ -267,48 +234,65 @@ def train_classifier(args):
     train_loader, val_loader, test_loader = make_loaders(args)
 
     model     = VGG11Classifier(num_classes=NUM_BREEDS, dropout_p=args.dropout_p).to(device)
-    # applying kaiming init to the classifier head only (encoder will be loaded from checkpoint)
+    
     model.apply(init_weights)
 
-    criterion = nn.CrossEntropyLoss(label_smoothing=0.15)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.clf_lr, weight_decay=1e-5)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.clf_lr, weight_decay=1e-3)
 
     warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=5)
-    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=args.clf_epochs - 5)
+    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=max(1, args.clf_epochs - 5))
     scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[5])
-    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.clf_epochs, eta_min=1e-6)
 
     best_f1 = 0.0
+    patience = 0
+    early_stop = getattr(args, "clf_patience", 25)
+    scaler = torch.amp.GradScaler('cuda')   
+
+    from viz import mixup_criterion, mixup_data
+
     for epoch in range(1, args.clf_epochs + 1):
-        # ---- Train ----
         model.train()
         t_loss = 0.0
         t_preds, t_labels = [], []
 
-        scaler = torch.amp.GradScaler('cuda')  # for mixed precision training (optional)
         for imgs, labels, _, _ in train_loader:
-            imgs, labels = imgs.to(device), labels.to(device)
+
+            
+            if np.random.rand() < 0.7:
+                imgs, targets_a, targets_b, lam = mixup_data(imgs, labels, alpha=0.2)
+            else:
+                targets_a = targets_b = labels
+                lam = 1.0
+
+            imgs = imgs.to(device)
+            targets_a = targets_a.to(device)
+            targets_b = targets_b.to(device)
+
             optimizer.zero_grad()
 
             with torch.amp.autocast('cuda'):
                 logits = model(imgs)
-                loss   = criterion(logits, labels)
+                loss = mixup_criterion(criterion, logits, targets_a, targets_b, lam)
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            # loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+
             scaler.step(optimizer)
             scaler.update()
+
             t_loss += loss.item()
-            t_preds.extend(logits.argmax(1).cpu().tolist())
-            t_labels.extend(labels.cpu().tolist())
+            
+            preds = logits.argmax(1)
+            t_preds.extend(preds.cpu().tolist())
+            t_labels.extend(targets_a.cpu().tolist())   
 
         t_loss /= len(train_loader)
-        t_m     = clf_metrics(t_preds, t_labels)
-        scheduler.step()
+        t_m = clf_metrics(t_preds, t_labels)
 
-        # ---- Val ----
+        scheduler.step()
+        
         model.eval()
         v_loss = 0.0
         v_preds, v_labels = [], []
@@ -350,10 +334,16 @@ def train_classifier(args):
         }, args.use_wandb)
 
         if v_m["f1_macro"] > best_f1:
+            patience = 0
             best_f1 = v_m["f1_macro"]
             save_checkpoint(CKPT_CLF, model, epoch, best_f1)
+        else:
+            patience += 1
+            if patience >= early_stop:
+                print(f"  Early stopping at epoch {epoch} with best f1_macro={best_f1:.4f}")
+                break
 
-    # ---- Test (final evaluation only) ----
+    
     ckpt  = torch.load(CKPT_CLF, map_location=device, weights_only=True)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
@@ -387,10 +377,6 @@ def train_classifier(args):
     return best_f1
 
 
-# --------------------------------------------------------------------------- #
-#  Task 2: Localisation                                                        #
-# --------------------------------------------------------------------------- #
-
 def train_localizer(args):
     print(f"\n{'='*60}\nTASK 2: Localisation\n{'='*60}")
     device = args.device
@@ -405,48 +391,46 @@ def train_localizer(args):
     load_backbone_from_classifier(model, CKPT_CLF, encoder_attr="encoder")
 
     mse_loss = nn.MSELoss()
-    iou_loss = IoULoss(reduction="mean")   # requires inputs in [0,1]
+    iou_loss = IoULoss(reduction="mean")   
 
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.loc_lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.loc_epochs, eta_min=1e-6)
 
-    unfreeze_at = max(1, args.loc_epochs // 3)
+    unfreeze_at = min(5, args.loc_epochs // 3)
     best_iou    = 0.0
 
     for epoch in range(1, args.loc_epochs + 1):
 
-        # Unfreeze backbone after warmup
+        
         if epoch == unfreeze_at:
             for p in model.encoder.parameters():
                 p.requires_grad = True
-            optimizer = torch.optim.Adam(
+            optimizer = torch.optim.AdamW(
                 model.parameters(), lr=args.loc_lr * 0.1, weight_decay=1e-4)
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer, T_max=args.loc_epochs - epoch + 1, eta_min=1e-6)
             print(f"  [Epoch {epoch}] backbone unfrozen (lr={args.loc_lr*0.1:.2e})")
 
-        # ---- Train ----
+        
         model.train()
         t_mse, t_iou_loss, t_total, t_iou_metric = 0., 0., 0., 0.
         for imgs, _, bboxes_norm, _ in train_loader:
             imgs        = imgs.to(device)
-            bboxes_norm = bboxes_norm.to(device)        # [0,1] normalised
-            bboxes_px   = bboxes_norm * IMG_SIZE        # pixel-space targets
+            bboxes_norm = bboxes_norm.to(device)        
+            bboxes_px   = bboxes_norm * IMG_SIZE        
 
             optimizer.zero_grad()
-            pred_px   = model(imgs)                     # pixel-space output (no sigmoid)
+            pred_px   = model(imgs)                     
 
-            # MSE in pixel space (both pred and target in pixels)
             loss_mse  = mse_loss(pred_px, bboxes_px)
 
-            # IoU loss requires [0,1] — normalise pred, clamp for safety
             pred_norm = torch.clamp(pred_px / IMG_SIZE, 0.0, 1.0)
-            loss_iou  = iou_loss(pred_norm, bboxes_norm)   # both in [0,1] ✓
+            loss_iou  = iou_loss(pred_norm, bboxes_norm)   
 
-            loss = loss_mse + loss_iou * (IMG_SIZE ** 2)   # scale IoU to match MSE magnitude
+            loss = loss_mse + loss_iou * (IMG_SIZE ** 2)   
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
@@ -459,8 +443,7 @@ def train_localizer(args):
         n = len(train_loader)
         t_mse /= n; t_iou_loss /= n; t_total /= n; t_iou_metric /= n
         scheduler.step()
-
-        # ---- Val ----
+        
         model.eval()
         v_mse, v_iou_loss, v_total, v_iou_metric = 0., 0., 0., 0.
         with torch.no_grad():
@@ -500,49 +483,27 @@ def train_localizer(args):
         if v_iou_metric > best_iou:
             best_iou = v_iou_metric
             save_checkpoint(CKPT_LOC, model, epoch, best_iou)
-
-    # ---- Test ----
+    
     ckpt = torch.load(CKPT_LOC, map_location=device, weights_only=True)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
-    te_mse, te_iou_loss, te_total, te_iou_metric = 0., 0., 0., 0.
     with torch.no_grad():
         for imgs, _, bboxes_norm, _ in test_loader:
             imgs        = imgs.to(device)
-            bboxes_norm = bboxes_norm.to(device)
-            bboxes_px   = bboxes_norm * IMG_SIZE
             pred_px     = model(imgs)
             pred_norm   = torch.clamp(pred_px / IMG_SIZE, 0.0, 1.0)
-            l_mse       = mse_loss(pred_px, bboxes_px)
-            l_iou       = iou_loss(pred_norm, bboxes_norm)
-            te_mse        += l_mse.item()
-            te_iou_loss   += l_iou.item()
-            te_total      += (l_mse + l_iou * IMG_SIZE**2).item()
-            te_iou_metric += iou_metric(pred_norm, bboxes_norm)
 
     n = len(test_loader)
-    te_mse /= n; te_iou_loss /= n; te_total /= n; te_iou_metric /= n
-    print(f"  [TEST] mse={te_mse:.2f} iou_loss={te_iou_loss:.4f} mIoU={te_iou_metric:.4f}")
-    wandb_log({
-        "loc/test/mse_loss":   te_mse,
-        "loc/test/iou_loss":   te_iou_loss,
-        "loc/test/total_loss": te_total,
-        "loc/test/mean_iou":   te_iou_metric,
-    }, args.use_wandb)
 
     if args.use_wandb:
         wandb.finish()
     return best_iou
 
 
-# --------------------------------------------------------------------------- #
-#  Task 3: Segmentation                                                        #
-# --------------------------------------------------------------------------- #
-
 def train_segmentation(args):
     print(f"\n{'='*60}\nTASK 3: Segmentation  (seg_classes={args.seg_classes})\n{'='*60}")
     device = args.device
-    nc     = args.seg_classes   # 1 or 3
+    nc     = args.seg_classes   
 
     if args.use_wandb:
         wandb.init(project=args.wandb_project, name=f"task3-unet-nc{nc}",
@@ -554,17 +515,14 @@ def train_segmentation(args):
                       dropout_p=args.dropout_p).to(device)
     load_backbone_from_classifier(model, CKPT_CLF, encoder_attr="encoder")
 
-    # Loss function depends on num_classes
+    
     if nc == 1:
-        # Binary: foreground (trimap=0) vs rest
+        
         criterion = nn.BCEWithLogitsLoss()
     else:
-        # 3-class: {0=fg, 1=bg, 2=boundary}
-        # Upweight boundary (rare) and foreground to prevent background dominance
         class_weights = torch.tensor([1.5, 1.0, 2.0], device=device)
         criterion = nn.CrossEntropyLoss(weight=class_weights)
-
-    # Freeze encoder for warmup
+    
     for p in model.encoder.parameters():
         p.requires_grad = False
     optimizer = torch.optim.Adam(
@@ -586,23 +544,22 @@ def train_segmentation(args):
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer, T_max=args.seg_epochs - epoch + 1, eta_min=1e-6)
             print(f"  [Epoch {epoch}] encoder unfrozen")
-
-        # ---- Train ----
+        
         model.train()
         t_loss = 0.0
         all_pred, all_tgt = [], []
 
         for imgs, _, _, masks in train_loader:
             imgs  = imgs.to(device)
-            masks = masks.to(device)    # [B,H,W] int64, values {0,1,2}
+            masks = masks.to(device)    
 
             optimizer.zero_grad()
-            logits = model(imgs)        # [B, nc, H, W]
+            logits = model(imgs)        
 
             if nc == 1:
-                target = (masks == 0).float()   # fg=1, rest=0
+                target = (masks == 0).float()   
                 loss   = criterion(logits.squeeze(1), target)
-                preds  = (logits.squeeze(1) > 0).long()  # >0 means sigmoid>0.5
+                preds  = (logits.squeeze(1) > 0).long()  
             else:
                 loss  = criterion(logits, masks)
                 preds = logits.argmax(1)
@@ -619,8 +576,7 @@ def train_segmentation(args):
         t_tgt_all  = torch.cat(all_tgt)
         t_m = seg_metrics(t_pred_all, t_tgt_all, nc if nc > 1 else 2)
         scheduler.step()
-
-        # ---- Val ----
+        
         model.eval()
         v_loss = 0.0
         all_pred, all_tgt = [], []
@@ -680,7 +636,7 @@ def train_segmentation(args):
             best_dice = v_m["mean_dice"]
             save_checkpoint(CKPT_SEG, model, epoch, best_dice)
 
-    # ---- Test ----
+    
     ckpt = torch.load(CKPT_SEG, map_location=device, weights_only=True)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
@@ -727,16 +683,12 @@ def train_segmentation(args):
     return best_dice
 
 
-# --------------------------------------------------------------------------- #
-#  Args                                                                        #
-# --------------------------------------------------------------------------- #
-
 def parse_args():
     p = argparse.ArgumentParser(description="DA6401 Assignment-2 Training")
 
     p.add_argument("--data_root",     type=str,   default="./data/oxford-iiit-pet/")
     p.add_argument("--num_workers", type=int, default=2)
-    p.add_argument("--task",          type=str,   default="clf",
+    p.add_argument("--task",          type=str,   default="loc",
                    choices=["all", "clf", "loc", "seg"])
     p.add_argument("-b", "--batch_size",    type=int,   default=64)
     p.add_argument("-dp", "--dropout_p",     type=float, default=0.5)
@@ -744,6 +696,7 @@ def parse_args():
 
     p.add_argument("--clf_lr",        type=float, default=1e-4)
     p.add_argument("--clf_epochs",    type=int,   default=70)
+    p.add_argument("--clf_patience",  type=int,   default=10)
 
     p.add_argument("--loc_lr",        type=float, default=1e-3)
     p.add_argument("--loc_epochs",    type=int,   default=30)
@@ -758,11 +711,6 @@ def parse_args():
                    help="Enable Weights & Biases logging")
 
     return p.parse_args()
-
-
-# --------------------------------------------------------------------------- #
-#  Main                                                                        #
-# --------------------------------------------------------------------------- #
 
 if __name__ == "__main__":
     args        = parse_args()
@@ -785,3 +733,7 @@ if __name__ == "__main__":
     print("\nDone. Checkpoints saved:")
     for ck in [CKPT_CLF, CKPT_LOC, CKPT_SEG]:
         print(f"  {ck}  {'✓' if os.path.exists(ck) else '(not trained)'}")
+
+
+# Ran command 
+# python train.py --use_wandb -b 64 -dp 0.6 --task clf --clf_lr 0.0001 --clf_epochs 40

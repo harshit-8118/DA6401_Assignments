@@ -13,9 +13,9 @@ class RegressionHead(nn.Module):
         self.pool = nn.AdaptiveAvgPool2d((7, 7))
         self.flatten = nn.Flatten()
         self.fc = nn.Sequential(    
-            nn.Linear(512 * 7 * 7, 1024, bias=True),
+            nn.Linear(512 * 7 * 7, 1536, bias=True),
             nn.ReLU(inplace=True),
-            nn.Linear(1024, 4, bias=True),
+            nn.Linear(1536, 4, bias=True),
             nn.ReLU(inplace=True), 
         )
 

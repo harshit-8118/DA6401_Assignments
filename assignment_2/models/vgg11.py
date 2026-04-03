@@ -3,7 +3,7 @@ VGG11 encoder
 """
 
 from typing import Dict, Tuple, Union
-from layers import CustomDropout
+from .layers import CustomDropout
 
 import torch
 import torch.nn as nn

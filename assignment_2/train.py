@@ -72,7 +72,7 @@ def load_backbone_from_classifier(model, clf_path: str, encoder_attr: str = "enc
           f"missing={len(missing)} unexpected={len(unexpected)}")
 
 
-def make_loaders(args):
+def make_loaders(args, use_aug=True):
     from data.pets_dataset import (OxfordIIITPetDataset,
                                     get_train_transforms,
                                     get_val_transforms)
@@ -84,9 +84,9 @@ def make_loaders(args):
     
     train_ds = OxfordIIITPetDataset(
         root        = args.data_root,
-        records     = _expand_aug_records(train_records, root),
-        images_dir  = root / "images_aug",
-        masks_dir   = root / "annotations" / "trimaps_aug",
+        records     = _expand_aug_records(train_records, root) if use_aug else train_records,
+        images_dir  = root / "images_aug" if use_aug else root / "images",
+        masks_dir   = root / "annotations" / "trimaps_aug" if use_aug else root / "annotations" / "trimaps",
         transform   = get_train_transforms(IMG_SIZE),
     )
  
@@ -107,7 +107,6 @@ def make_loaders(args):
     kw = dict(num_workers=args.num_workers,
               pin_memory=(args.device.type == "cuda"))
  
-    print(len(train_ds), len(val_ds), len(test_ds))
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
                               shuffle=True,  drop_last=True,  **kw)
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size,
@@ -222,6 +221,7 @@ def init_weights(m):
     elif isinstance(m, nn.Linear):
         nn.init.normal_(m.weight, 0, 0.01)
         nn.init.constant_(m.bias, 0)
+
 
 def train_classifier(args):
     print(f"\n{'='*60}\nTASK 1: Classification\n{'='*60}")
@@ -379,129 +379,156 @@ def train_classifier(args):
         wandb.finish()
     return best_f1
 
-
 def train_localizer(args):
     print(f"\n{'='*60}\nTASK 2: Localisation\n{'='*60}")
     device = args.device
-
+ 
     if args.use_wandb:
         wandb.init(project=args.wandb_project, name="task2-localizer",
                    config=vars(args), reinit=True)
-
-    train_loader, val_loader, test_loader = make_loaders(args)
-
-    model    = VGG11Localizer(dropout_p=args.dropout_p, freeze_backbone=True).to(device)
+ 
+    train_loader, val_loader, _ = make_loaders(args, use_aug=False)
+ 
+    model = VGG11Localizer(dropout_p=args.dropout_p,
+                            freeze_backbone=False).to(device)
     load_backbone_from_classifier(model, CKPT_CLF, encoder_attr="encoder")
-
-    mse_loss = nn.MSELoss()
-    iou_loss = IoULoss(reduction="mean")   
-
-    optimizer = torch.optim.AdamW(
+ 
+    mse_fn = nn.MSELoss()
+    iou_fn = IoULoss(reduction="mean")
+ 
+    stage1_end = getattr(args, "loc_stage1", 10)
+    stage2_end = stage1_end + getattr(args, "loc_stage2", 5)
+ 
+    def _freeze(m):
+        for p in m.parameters(): p.requires_grad = False
+ 
+    def _unfreeze(m):
+        for p in m.parameters(): p.requires_grad = True
+ 
+    def _make_opt_sched(params, lr, n_epochs):
+        opt   = torch.optim.AdamW(list(params), lr=lr, weight_decay=1e-4)
+        sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=max(1, n_epochs), eta_min=1e-7)
+        return opt, sched
+ 
+    _freeze(model.encoder.enc1)
+    _freeze(model.encoder.enc2)
+    _freeze(model.encoder.enc3)
+ 
+    optimizer, scheduler = _make_opt_sched(
         filter(lambda p: p.requires_grad, model.parameters()),
-        lr=args.loc_lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.loc_epochs, eta_min=1e-6)
-
-    unfreeze_at = min(5, args.loc_epochs // 3)
-    best_iou    = 0.0
-
+        args.loc_lr, stage1_end)
+ 
+    print(f"  Stage 1 (1-{stage1_end}): enc4+enc5+head only")
+    print(f"  Stage 2 ({stage1_end+1}-{stage2_end}): +enc3")
+    print(f"  Stage 3 ({stage2_end+1}-{args.loc_epochs}): full fine-tune")
+ 
+    best_iou, best_epoch, patience_count = 0.0, 0, 0
+    early_stop = getattr(args, "loc_patience", 15)
+ 
     for epoch in range(1, args.loc_epochs + 1):
-
-        
-        if epoch == unfreeze_at:
-            for p in model.encoder.parameters():
-                p.requires_grad = True
-            optimizer = torch.optim.AdamW(
-                model.parameters(), lr=args.loc_lr * 0.1, weight_decay=1e-4)
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=args.loc_epochs - epoch + 1, eta_min=1e-6)
-            print(f"  [Epoch {epoch}] backbone unfrozen (lr={args.loc_lr*0.1:.2e})")
-
-        
+ 
+        # Progressive unfreeze
+        if epoch == stage1_end + 1:
+            _unfreeze(model.encoder.enc3)
+            optimizer, scheduler = _make_opt_sched(
+                filter(lambda p: p.requires_grad, model.parameters()),
+                args.loc_lr * 0.3, stage2_end - stage1_end)
+            print(f"  [Epoch {epoch}] Stage 2: enc3 unfrozen")
+ 
+        elif epoch == stage2_end + 1:
+            _unfreeze(model.encoder.enc1)
+            _unfreeze(model.encoder.enc2)
+            optimizer, scheduler = _make_opt_sched(
+                filter(lambda p: p.requires_grad, model.parameters()),
+                args.loc_lr * 0.1, args.loc_epochs - stage2_end)
+            print(f"  [Epoch {epoch}] Stage 3: full model")
+ 
+        # ── Train ────────────────────────────────────────────────────────
         model.train()
-        t_mse, t_iou_loss, t_total, t_iou_metric = 0., 0., 0., 0.
+        t_mse, t_iou_l, t_total, t_iou_m = 0., 0., 0., 0.
+ 
         for imgs, _, bboxes_norm, _ in train_loader:
             imgs        = imgs.to(device)
-            bboxes_norm = bboxes_norm.to(device)        
-            bboxes_px   = bboxes_norm * IMG_SIZE        
-
+            bboxes_norm = bboxes_norm.to(device)      # [0,1] normalised targets
+ 
             optimizer.zero_grad()
-            pred_px   = model(imgs)                     
-
-            loss_mse  = mse_loss(pred_px, bboxes_px)
-
-            pred_norm = torch.clamp(pred_px / IMG_SIZE, 0.0, 1.0)
-            loss_iou  = iou_loss(pred_norm, bboxes_norm)   
-
-            loss = loss_mse + loss_iou * (IMG_SIZE ** 2)   
+            pred_px   = model(imgs)                   # pixel output [B,4]
+            pred_norm = torch.clamp(pred_px / IMG_SIZE, 0.0, 1.0)  # normalise for loss
+ 
+            loss_mse  = mse_fn(pred_norm, bboxes_norm)
+            loss_iou  = iou_fn(pred_norm, bboxes_norm)
+            loss      = loss_mse + loss_iou
+ 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
-
-            t_mse        += loss_mse.item()
-            t_iou_loss   += loss_iou.item()
-            t_total      += loss.item()
-            t_iou_metric += iou_metric(pred_norm.detach(), bboxes_norm)
-
+ 
+            t_mse   += loss_mse.item()
+            t_iou_l += loss_iou.item()
+            t_total += loss.item()
+            t_iou_m += iou_metric(pred_norm.detach(), bboxes_norm)
+ 
         n = len(train_loader)
-        t_mse /= n; t_iou_loss /= n; t_total /= n; t_iou_metric /= n
+        t_mse /= n; t_iou_l /= n; t_total /= n; t_iou_m /= n
         scheduler.step()
-        
+ 
+        # ── Val ──────────────────────────────────────────────────────────
         model.eval()
-        v_mse, v_iou_loss, v_total, v_iou_metric = 0., 0., 0., 0.
+        v_mse, v_iou_l, v_total, v_iou_m = 0., 0., 0., 0.
+ 
         with torch.no_grad():
             for imgs, _, bboxes_norm, _ in val_loader:
                 imgs        = imgs.to(device)
                 bboxes_norm = bboxes_norm.to(device)
-                bboxes_px   = bboxes_norm * IMG_SIZE
                 pred_px     = model(imgs)
                 pred_norm   = torch.clamp(pred_px / IMG_SIZE, 0.0, 1.0)
-                l_mse       = mse_loss(pred_px, bboxes_px)
-                l_iou       = iou_loss(pred_norm, bboxes_norm)
-                v_mse        += l_mse.item()
-                v_iou_loss   += l_iou.item()
-                v_total      += (l_mse + l_iou * IMG_SIZE**2).item()
-                v_iou_metric += iou_metric(pred_norm, bboxes_norm)
-
+ 
+                l_mse    = mse_fn(pred_norm, bboxes_norm)
+                l_iou    = iou_fn(pred_norm, bboxes_norm)
+                v_mse   += l_mse.item()
+                v_iou_l += l_iou.item()
+                v_total += (l_mse + l_iou).item()
+                v_iou_m += iou_metric(pred_norm, bboxes_norm)
+ 
         n = len(val_loader)
-        v_mse /= n; v_iou_loss /= n; v_total /= n; v_iou_metric /= n
-
+        v_mse /= n; v_iou_l /= n; v_total /= n; v_iou_m /= n
+ 
         print(f"  Epoch {epoch:3d}/{args.loc_epochs} | "
-              f"train mse={t_mse:.2f} iou_l={t_iou_loss:.4f} miou={t_iou_metric:.4f} | "
-              f"val   mse={v_mse:.2f} iou_l={v_iou_loss:.4f} miou={v_iou_metric:.4f}")
-
+              f"train mse={t_mse:.4f} iou_l={t_iou_l:.4f} miou={t_iou_m:.4f} | "
+              f"val   mse={v_mse:.4f} iou_l={v_iou_l:.4f} miou={v_iou_m:.4f}")
+ 
         wandb_log({
-            "epoch": epoch,
-            "loc/lr":                scheduler.get_last_lr()[0],
-            "loc/train/mse_loss":    t_mse,
-            "loc/train/iou_loss":    t_iou_loss,
-            "loc/train/total_loss":  t_total,
-            "loc/train/mean_iou":    t_iou_metric,
-            "loc/val/mse_loss":      v_mse,
-            "loc/val/iou_loss":      v_iou_loss,
-            "loc/val/total_loss":    v_total,
-            "loc/val/mean_iou":      v_iou_metric,
+            "epoch":                epoch,
+            "loc/best_epoch":       epoch if v_iou_m > best_iou else best_epoch,
+            "loc/lr":               scheduler.get_last_lr()[0],
+            "loc/train/mse":        t_mse,
+            "loc/train/iou_loss":   t_iou_l,
+            "loc/train/total_loss": t_total,
+            "loc/train/mean_iou":   t_iou_m,
+            "loc/val/mse":          v_mse,
+            "loc/val/iou_loss":     v_iou_l,
+            "loc/val/total_loss":   v_total,
+            "loc/val/mean_iou":     v_iou_m,
         }, args.use_wandb)
-
-        if v_iou_metric > best_iou:
-            best_iou = v_iou_metric
+ 
+        if v_iou_m > best_iou:
+            best_iou, best_epoch, patience_count = v_iou_m, epoch, 0
             save_checkpoint(CKPT_LOC, model, epoch, best_iou)
-    
-    ckpt = torch.load(CKPT_LOC, map_location=device, weights_only=True)
-    model.load_state_dict(ckpt["state_dict"])
-    model.eval()
-    with torch.no_grad():
-        for imgs, _, bboxes_norm, _ in test_loader:
-            imgs        = imgs.to(device)
-            pred_px     = model(imgs)
-            pred_norm   = torch.clamp(pred_px / IMG_SIZE, 0.0, 1.0)
-
-    n = len(test_loader)
-
+        else:
+            patience_count += 1
+            if patience_count >= early_stop:
+                print(f"  Early stopping at epoch {epoch} "
+                      f"(best val mIoU={best_iou:.4f})")
+                break
+ 
+    print(f"\n  [TEST] No bbox annotations in test split.")
+    print(f"  Best val mIoU = {best_iou:.4f} (epoch {best_epoch})")
+    wandb_log({"loc/val/best_miou": best_iou}, args.use_wandb)
+ 
     if args.use_wandb:
         wandb.finish()
     return best_iou
-
 
 def train_segmentation(args):
     print(f"\n{'='*60}\nTASK 3: Segmentation  (seg_classes={args.seg_classes})\n{'='*60}")
@@ -703,6 +730,11 @@ def parse_args():
 
     p.add_argument("--loc_lr",        type=float, default=1e-3)
     p.add_argument("--loc_epochs",    type=int,   default=30)
+    p.add_argument("--loc_patience", type=int, default=15)
+    p.add_argument("--loc_stage1",   type=int, default=10,
+                   help="epochs to train enc4/enc5/head only")
+    p.add_argument("--loc_stage2",   type=int, default=5,
+                   help="epochs to train enc3+ after stage1")
 
     p.add_argument("--seg_lr",        type=float, default=1e-3)
     p.add_argument("--seg_epochs",    type=int,   default=30)
@@ -739,4 +771,9 @@ if __name__ == "__main__":
 
 
 # Ran command 
+# classification
 # python train.py --use_wandb -b 64 -dp 0.5 --task clf --clf_lr 0.0005 --clf_epochs 70 -> classifier train f1 74 | val f1 68 | test f1 63
+
+
+# localisation
+# python train.py --task loc -b 32 -dp 0.4 --loc_lr 0.001 --loc_epochs 50 --loc_patience 15 --loc_stage1 20 --loc_stage2 10 --use_wandb -> m_iou val 0.64451 and train 0.72391 

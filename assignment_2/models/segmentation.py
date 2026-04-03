@@ -4,7 +4,7 @@
 import torch
 import torch.nn as nn
 
-from vgg11 import VGG11Encoder
+from .vgg11 import VGG11Encoder
 
 class DecoderBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int) -> None:

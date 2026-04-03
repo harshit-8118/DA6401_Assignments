@@ -3,21 +3,32 @@
 
 import torch
 import torch.nn as nn
-from vgg11 import VGG11Encoder
+from .vgg11 import VGG11Encoder
+from .layers import CustomDropout
 
+IMG_SIZE = 224
 class RegressionHead(nn.Module):
     """Regression head for bounding box prediction."""
 
-    def __init__(self):
+    def __init__(self, dropout_p: float = 0.5):
         super(RegressionHead, self).__init__()
         self.pool = nn.AdaptiveAvgPool2d((7, 7))
         self.flatten = nn.Flatten()
         self.fc = nn.Sequential(    
-            nn.Linear(512 * 7 * 7, 1536, bias=True),
+            nn.Linear(512 * 7 * 7, 2048, bias=True),
             nn.ReLU(inplace=True),
-            nn.Linear(1536, 4, bias=True),
+            CustomDropout(p=dropout_p),
+            nn.Linear(2048, 4, bias=True),
             nn.ReLU(inplace=True), 
         )
+        self._init_weights()    
+ 
+    def _init_weights(self):
+        nn.init.xavier_uniform_(self.fc[0].weight)
+        nn.init.constant_(self.fc[0].bias, 0.0)
+        # Last layer: small weights + bias at image center
+        nn.init.xavier_uniform_(self.fc[3].weight, gain=0.1)
+        # nn.init.constant_(self.fc[3].bias, IMG_SIZE / 2)
 
     def forward(self, f5: torch.Tensor) -> torch.Tensor:
         """Forward pass for regression head.
@@ -40,7 +51,7 @@ class VGG11Localizer(nn.Module):
             for param in self.encoder.parameters():
                 param.requires_grad = False
 
-        self.regression_head = RegressionHead()
+        self.regression_head = RegressionHead(dropout_p=dropout_p)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass for localization model.
@@ -48,7 +59,7 @@ class VGG11Localizer(nn.Module):
             Bounding box coordinates [B, 4] in (x_center, y_center, width, height) format.
         """
         # TODO: Implement forward pass.
-        out, features = self.encoder(x, return_features=True)
+        _, features = self.encoder(x, return_features=True)
         f5 = features['f5']
         return self.regression_head(f5)
 

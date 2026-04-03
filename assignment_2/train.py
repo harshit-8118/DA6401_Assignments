@@ -238,7 +238,7 @@ def train_classifier(args):
     model.apply(init_weights)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.clf_lr, weight_decay=1e-3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.clf_lr, weight_decay=5e-4)
 
     warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=5)
     cosine_scheduler = CosineAnnealingLR(optimizer, T_max=max(1, args.clf_epochs - 5))
@@ -259,7 +259,7 @@ def train_classifier(args):
         for imgs, labels, _, _ in train_loader:
 
             
-            if np.random.rand() < 0.7:
+            if np.random.rand() < 0.6:
                 imgs, targets_a, targets_b, lam = mixup_data(imgs, labels, alpha=0.2)
             else:
                 targets_a = targets_b = labels
@@ -312,6 +312,7 @@ def train_classifier(args):
 
         wandb_log({
             "epoch": epoch,
+            'best_epoch': epoch if v_m["f1_macro"] > best_f1 else best_f1,
             "clf/lr":              scheduler.get_last_lr()[0],
             "clf/train/loss":      t_loss,
             "clf/train/accuracy":  t_m["accuracy"],
@@ -696,7 +697,7 @@ def parse_args():
 
     p.add_argument("--clf_lr",        type=float, default=1e-4)
     p.add_argument("--clf_epochs",    type=int,   default=70)
-    p.add_argument("--clf_patience",  type=int,   default=10)
+    p.add_argument("--clf_patience",  type=int,   default=20)
 
     p.add_argument("--loc_lr",        type=float, default=1e-3)
     p.add_argument("--loc_epochs",    type=int,   default=30)
@@ -736,4 +737,4 @@ if __name__ == "__main__":
 
 
 # Ran command 
-# python train.py --use_wandb -b 64 -dp 0.6 --task clf --clf_lr 0.0001 --clf_epochs 40
+# python train.py --use_wandb -b 64 -dp 0.5 --task clf --clf_lr 0.0005 --clf_epochs 70 -> classifier train f1 66 | val f1 63 | test f1 57

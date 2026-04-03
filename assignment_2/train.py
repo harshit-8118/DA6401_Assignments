@@ -238,13 +238,14 @@ def train_classifier(args):
     model.apply(init_weights)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.clf_lr, weight_decay=5e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.clf_lr, weight_decay=5e-5)
 
     warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=5)
     cosine_scheduler = CosineAnnealingLR(optimizer, T_max=max(1, args.clf_epochs - 5))
     scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[5])
 
     best_f1 = 0.0
+    best_epoch = 0
     patience = 0
     early_stop = getattr(args, "clf_patience", 25)
     scaler = torch.amp.GradScaler('cuda')   
@@ -259,8 +260,8 @@ def train_classifier(args):
         for imgs, labels, _, _ in train_loader:
 
             
-            if np.random.rand() < 0.6:
-                imgs, targets_a, targets_b, lam = mixup_data(imgs, labels, alpha=0.2)
+            if np.random.rand() < 0.5:
+                imgs, targets_a, targets_b, lam = mixup_data(imgs, labels, alpha=0.1)
             else:
                 targets_a = targets_b = labels
                 lam = 1.0
@@ -312,7 +313,7 @@ def train_classifier(args):
 
         wandb_log({
             "epoch": epoch,
-            'best_epoch': epoch if v_m["f1_macro"] > best_f1 else best_f1,
+            'best_epoch': epoch if v_m["f1_macro"] > best_f1 else best_epoch,
             "clf/lr":              scheduler.get_last_lr()[0],
             "clf/train/loss":      t_loss,
             "clf/train/accuracy":  t_m["accuracy"],
@@ -336,6 +337,7 @@ def train_classifier(args):
 
         if v_m["f1_macro"] > best_f1:
             patience = 0
+            best_epoch = epoch
             best_f1 = v_m["f1_macro"]
             save_checkpoint(CKPT_CLF, model, epoch, best_f1)
         else:
@@ -737,4 +739,4 @@ if __name__ == "__main__":
 
 
 # Ran command 
-# python train.py --use_wandb -b 64 -dp 0.5 --task clf --clf_lr 0.0005 --clf_epochs 70 -> classifier train f1 66 | val f1 63 | test f1 57
+# python train.py --use_wandb -b 64 -dp 0.5 --task clf --clf_lr 0.0005 --clf_epochs 70 -> classifier train f1 74 | val f1 68 | test f1 63

@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader, random_split
 from sklearn.metrics import (
     accuracy_score, f1_score, precision_score, recall_score,
 )
+import torch.nn.functional as F
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 import wandb
 
@@ -28,7 +29,7 @@ os.makedirs("checkpoints", exist_ok=True)
 
 CKPT_CLF   = os.path.join("checkpoints", "classifier.pth")
 CKPT_LOC   = os.path.join("checkpoints", "localizer.pth")
-CKPT_SEG   = os.path.join("checkpoints", "unet.pth")
+CKPT_SEG   = os.path.join("checkpoints", "unet")
 
 def set_seed(seed: int = 42):
     """Fix seed at hardware level for full reproducibility."""
@@ -42,8 +43,8 @@ def set_seed(seed: int = 42):
     os.environ["PYTHONHASHSEED"] = str(seed)
 
 
-def get_device() -> torch.device:
-    return torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+def get_device(device: str) -> torch.device:
+    return torch.device(device if torch.cuda.is_available() else "cpu")
 
 
 def save_checkpoint(path: str, model: nn.Module, epoch: int, best_metric: float):
@@ -175,6 +176,20 @@ def iou_metric(pred_norm: torch.Tensor, tgt_norm: torch.Tensor,
     union = (px2-px1)*(py2-py1) + (tx2-tx1)*(ty2-ty1) - inter + eps
     return (inter / union).mean().item()
 
+def dice_loss_fn(logits, targets, num_classes, eps=1e-6):
+    """Soft multi-class Dice loss. logits: [B,C,H,W], targets: [B,H,W]."""
+    if num_classes == 1:
+        probs = torch.sigmoid(logits).squeeze(1) # [B, H, W]
+        inter = (probs * targets).sum((1, 2))
+        denom = probs.sum((1, 2)) + targets.sum((1, 2))
+    else:
+        probs  = F.softmax(logits, dim=1)
+        onehot = F.one_hot(targets, num_classes).permute(0, 3, 1, 2).float()
+        dims   = (0, 2, 3)
+        inter  = (probs * onehot).sum(dims)
+        denom  = probs.sum(dims) + onehot.sum(dims)
+    dice   = (2 * inter + eps) / (denom + eps)
+    return 1.0 - dice.mean()
 
 def seg_metrics(pred_mask: torch.Tensor, tgt_mask: torch.Tensor,
                 num_classes: int, eps: float = 1e-6) -> dict:
@@ -183,7 +198,6 @@ def seg_metrics(pred_mask: torch.Tensor, tgt_mask: torch.Tensor,
     t_flat = tgt_mask.cpu().numpy().ravel()
 
     px_acc = (pred_mask == tgt_mask).float().mean().item()
-
     
     dice_per_class = []
     for c in range(num_classes):
@@ -192,8 +206,21 @@ def seg_metrics(pred_mask: torch.Tensor, tgt_mask: torch.Tensor,
         d   = (2 * (p_c * t_c).sum() + eps) / (p_c.sum() + t_c.sum() + eps)
         dice_per_class.append(d.item())
     mean_dice = float(np.mean(dice_per_class))
-
     labels = list(range(num_classes))
+    if num_classes == 2:
+        return {
+            "px_accuracy":  px_acc,
+            "mean_dice":    mean_dice,
+            "dice_bg":      dice_per_class[0], # Class 0 was mapped to BG
+            "dice_fg":      dice_per_class[1], # Class 1 was mapped to (masks != 1)
+            "dice_boundary": 0.0,
+            "f1_macro":     f1_score(t_flat, p_flat, average="macro",    labels=labels, zero_division=0),
+            "f1_micro":     f1_score(t_flat, p_flat, average="micro",    labels=labels, zero_division=0),
+            "f1_weighted":  f1_score(t_flat, p_flat, average="weighted", labels=labels, zero_division=0),
+            "prec_macro":   precision_score(t_flat, p_flat, average="macro",    labels=labels, zero_division=0),
+            "rec_macro":    recall_score(t_flat, p_flat, average="macro",    labels=labels, zero_division=0),
+        }
+
     return {
         "px_accuracy":  px_acc,
         "mean_dice":    mean_dice,
@@ -533,80 +560,95 @@ def train_localizer(args):
 def train_segmentation(args):
     print(f"\n{'='*60}\nTASK 3: Segmentation  (seg_classes={args.seg_classes})\n{'='*60}")
     device = args.device
-    nc     = args.seg_classes   
-
+    nc     = args.seg_classes
+ 
     if args.use_wandb:
         wandb.init(project=args.wandb_project, name=f"task3-unet-nc{nc}",
                    config=vars(args), reinit=True)
-
-    train_loader, val_loader, test_loader = make_loaders(args)
-
+ 
+    train_loader, val_loader, test_loader = make_loaders(args, use_aug=False)
+ 
     model = VGG11UNet(num_classes=nc, in_channels=3,
                       dropout_p=args.dropout_p).to(device)
     load_backbone_from_classifier(model, CKPT_CLF, encoder_attr="encoder")
-
-    
+ 
     if nc == 1:
-        
-        criterion = nn.BCEWithLogitsLoss()
+        # Binary: foreground vs rest
+        criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([3.0]).to(device))
     else:
-        class_weights = torch.tensor([1.5, 1.0, 2.0], device=device)
-        criterion = nn.CrossEntropyLoss(weight=class_weights)
-    
+        # 3-class CE with inverse-frequency weights + soft Dice
+        # Weights: boundary upweighted heavily (~5x) since it's only ~8% of pixels
+        class_weights = torch.tensor([1.0, 0.7, 4.5], device=device)
+        criterion     = nn.CrossEntropyLoss(weight=class_weights)
+        # Dice loss added inside loop for nc==3
+ 
+    # Freeze encoder for warmup, then progressive unfreeze
     for p in model.encoder.parameters():
         p.requires_grad = False
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.seg_lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.seg_epochs, eta_min=1e-6)
-
+ 
     unfreeze_at = max(1, args.seg_epochs // 3)
     best_dice   = 0.0
-
+    patience    = 0
+    early_stop  = getattr(args, "seg_patience", 20)
+ 
     for epoch in range(1, args.seg_epochs + 1):
-
+ 
         if epoch == unfreeze_at:
             for p in model.encoder.parameters():
                 p.requires_grad = True
-            optimizer = torch.optim.Adam(
+            optimizer = torch.optim.AdamW(
                 model.parameters(), lr=args.seg_lr * 0.1, weight_decay=1e-4)
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer, T_max=args.seg_epochs - epoch + 1, eta_min=1e-6)
             print(f"  [Epoch {epoch}] encoder unfrozen")
-        
+ 
+        # ── Train ────────────────────────────────────────────────────────
         model.train()
         t_loss = 0.0
         all_pred, all_tgt = [], []
-
+ 
         for imgs, _, _, masks in train_loader:
             imgs  = imgs.to(device)
-            masks = masks.to(device)    
-
+            masks = masks.to(device)
+ 
             optimizer.zero_grad()
-            logits = model(imgs)        
-
+            logits = model(imgs)
+ 
             if nc == 1:
-                target = (masks == 0).float()   
-                loss   = criterion(logits.squeeze(1), target)
-                preds  = (logits.squeeze(1) > 0).long()  
+                target = (masks != 1).float()
+                logits_sq = logits.squeeze(1)
+                bce_loss = criterion(logits_sq, target)
+                d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
+                loss = bce_loss + d_loss
+                preds = (logits_sq > 0).long()
+                current_target = target.long().cpu()  
             else:
-                loss  = criterion(logits, masks)
-                preds = logits.argmax(1)
-
+                ce_loss   = criterion(logits, masks)
+                d_loss    = dice_loss_fn(logits, masks, nc)
+                loss      = ce_loss + d_loss          # CE + Dice
+                preds     = logits.argmax(1)
+                current_target = masks.cpu()
+ 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
             optimizer.step()
             t_loss += loss.item()
             all_pred.append(preds.detach().cpu())
-            all_tgt.append(masks.cpu())
-
-        t_loss /= len(train_loader)
+            all_tgt.append(current_target)
+ 
+        t_loss    /= len(train_loader)
         t_pred_all = torch.cat(all_pred)
         t_tgt_all  = torch.cat(all_tgt)
-        t_m = seg_metrics(t_pred_all, t_tgt_all, nc if nc > 1 else 2)
+        metrics_nc = 2 if nc == 1 else nc
+        t_m = seg_metrics(t_pred_all, t_tgt_all, num_classes=metrics_nc)
         scheduler.step()
-        
+ 
+        # ── Val ──────────────────────────────────────────────────────────
         model.eval()
         v_loss = 0.0
         all_pred, all_tgt = [], []
@@ -616,27 +658,35 @@ def train_segmentation(args):
                 masks = masks.to(device)
                 logits = model(imgs)
                 if nc == 1:
-                    target = (masks == 0).float()
-                    loss   = criterion(logits.squeeze(1), target)
-                    preds  = (logits.squeeze(1) > 0).long()
+                    target = (masks != 1).float()
+                    logits_sq = logits.squeeze(1)
+                    bce_loss = criterion(logits_sq, target)
+                    d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
+                    loss = bce_loss + d_loss
+                    preds = (logits_sq > 0).long()
+                    current_target = target.long().cpu()  
                 else:
-                    loss  = criterion(logits, masks)
-                    preds = logits.argmax(1)
+                    ce_loss   = criterion(logits, masks)
+                    d_loss    = dice_loss_fn(logits, masks, nc)
+                    loss      = ce_loss + d_loss          # CE + Dice
+                    preds     = logits.argmax(1)
+                    current_target = masks.cpu()
+
                 v_loss += loss.item()
                 all_pred.append(preds.cpu())
-                all_tgt.append(masks.cpu())
-
-        v_loss /= len(val_loader)
+                all_tgt.append(current_target)
+ 
+        v_loss    /= len(val_loader)
         v_pred_all = torch.cat(all_pred)
         v_tgt_all  = torch.cat(all_tgt)
-        v_m = seg_metrics(v_pred_all, v_tgt_all, nc if nc > 1 else 2)
-
+        v_m        = seg_metrics(v_pred_all, v_tgt_all, num_classes=metrics_nc)
+ 
         print(f"  Epoch {epoch:3d}/{args.seg_epochs} | "
               f"train loss={t_loss:.4f} dice={t_m['mean_dice']:.4f} px_acc={t_m['px_accuracy']:.4f} | "
               f"val   loss={v_loss:.4f} dice={v_m['mean_dice']:.4f} px_acc={v_m['px_accuracy']:.4f}")
-
+ 
         wandb_log({
-            "epoch": epoch,
+            "epoch":                     epoch,
             "seg/lr":                    scheduler.get_last_lr()[0],
             "seg/train/loss":            t_loss,
             "seg/train/mean_dice":       t_m["mean_dice"],
@@ -661,13 +711,19 @@ def train_segmentation(args):
             "seg/val/prec_macro":        v_m["prec_macro"],
             "seg/val/rec_macro":         v_m["rec_macro"],
         }, args.use_wandb)
-
+ 
         if v_m["mean_dice"] > best_dice:
             best_dice = v_m["mean_dice"]
-            save_checkpoint(CKPT_SEG, model, epoch, best_dice)
-
-    
-    ckpt = torch.load(CKPT_SEG, map_location=device, weights_only=True)
+            patience  = 0
+            save_checkpoint(CKPT_SEG + "_" + str(args.seg_classes)+ ".pth", model, epoch, best_dice)
+        else:
+            patience += 1
+            if patience >= early_stop:
+                print(f"  Early stopping at epoch {epoch} (best dice={best_dice:.4f})")
+                break
+ 
+    # ── Test ─────────────────────────────────────────────────────────────
+    ckpt = torch.load(CKPT_SEG + "_" + str(args.seg_classes)+ ".pth", map_location=device, weights_only=True)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
     te_loss = 0.0
@@ -678,20 +734,30 @@ def train_segmentation(args):
             masks = masks.to(device)
             logits = model(imgs)
             if nc == 1:
-                target = (masks == 0).float()
-                loss   = criterion(logits.squeeze(1), target)
-                preds  = (logits.squeeze(1) > 0).long()
+                target = (masks != 1).float()
+                logits_sq = logits.squeeze(1)
+                bce_loss = criterion(logits_sq, target)
+                d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
+                loss = bce_loss + d_loss
+                preds = (logits_sq > 0).long()
+                current_target = target.long().cpu()  
             else:
-                loss  = criterion(logits, masks)
-                preds = logits.argmax(1)
+                ce_loss   = criterion(logits, masks)
+                d_loss    = dice_loss_fn(logits, masks, nc)
+                loss      = ce_loss + d_loss          # CE + Dice
+                preds     = logits.argmax(1)
+                current_target = masks.cpu()
+
             te_loss += loss.item()
             all_pred.append(preds.cpu())
-            all_tgt.append(masks.cpu())
-
+            all_tgt.append(current_target)
+ 
     te_loss /= len(test_loader)
     te_pred  = torch.cat(all_pred)
     te_tgt   = torch.cat(all_tgt)
-    te_m     = seg_metrics(te_pred, te_tgt, nc if nc > 1 else 2)
+    metrics_nc = 2 if nc == 1 else nc
+    te_m     = seg_metrics(te_pred, te_tgt, metrics_nc)
+ 
     print(f"  [TEST] loss={te_loss:.4f} dice={te_m['mean_dice']:.4f} "
           f"px_acc={te_m['px_accuracy']:.4f} f1_macro={te_m['f1_macro']:.4f}")
     wandb_log({
@@ -702,21 +768,21 @@ def train_segmentation(args):
         "seg/test/dice_boundary": te_m["dice_boundary"],
         "seg/test/px_accuracy":   te_m["px_accuracy"],
         "seg/test/f1_macro":      te_m["f1_macro"],
-        "seg/test/f1_micro":      te_m["f1_mi" "cro"],
+        "seg/test/f1_micro":      te_m["f1_micro"],
         "seg/test/f1_weighted":   te_m["f1_weighted"],
         "seg/test/prec_macro":    te_m["prec_macro"],
         "seg/test/rec_macro":     te_m["rec_macro"],
     }, args.use_wandb)
-
+ 
     if args.use_wandb:
         wandb.finish()
     return best_dice
-
 
 def parse_args():
     p = argparse.ArgumentParser(description="DA6401 Assignment-2 Training")
 
     p.add_argument("--data_root",     type=str,   default="./data/oxford-iiit-pet/")
+    p.add_argument("--device",     type=str,   default="cuda:1")
     p.add_argument("--num_workers", type=int, default=2)
     p.add_argument("--task",          type=str,   default="loc",
                    choices=["all", "clf", "loc", "seg"])
@@ -740,7 +806,7 @@ def parse_args():
     p.add_argument("--seg_epochs",    type=int,   default=30)
     p.add_argument("--seg_classes",   type=int,   default=3, choices=[1, 3],
                    help="1=binary fg/rest, 3=full trimap {fg,bg,boundary}")
-
+    p.add_argument("--seg_patience", type=int, default=20)
     p.add_argument("--wandb_project", type=str,   default="DA6402-Assignment-2_v1")
     p.add_argument("--use_wandb",     action="store_true",
                    help="Enable Weights & Biases logging")
@@ -750,7 +816,7 @@ def parse_args():
 if __name__ == "__main__":
     args        = parse_args()
     set_seed(args.seed)
-    args.device = get_device()
+    args.device = get_device(args.device)
 
     print(f"Device : {args.device}")
     print(f"Task   : {args.task}")
@@ -777,3 +843,7 @@ if __name__ == "__main__":
 
 # localisation
 # python train.py --task loc -b 32 -dp 0.4 --loc_lr 0.001 --loc_epochs 50 --loc_patience 15 --loc_stage1 20 --loc_stage2 10 --use_wandb -> m_iou val 0.64451 and train 0.72391 
+
+# segmentation
+# python train.py --task seg --seg_classes 3 --seg_lr 1e-3 --seg_epochs 30 --seg_patience 10 --use_wandb --device cuda:1 -> mean_dice train 83 val 77 test 79
+# python train.py --task seg --seg_classes 1 --seg_lr 1e-3 --seg_epochs 30 --seg_patience 10 --use_wandb --device cuda:0 -> mean_dice train 93 val 89 test 91

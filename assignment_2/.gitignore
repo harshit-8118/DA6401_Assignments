@@ -5,3 +5,6 @@ test.py
 vgg.txt 
 wandb/
 *.pth 
+__pycache__/
+demo.py
+*.png

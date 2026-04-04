@@ -59,23 +59,11 @@ class VGG11UNet(nn.Module):
         enc1, enc2, enc3, enc4, enc5 = features['f1'], features['f2'], features['f3'], features['f4'], features['f5']
 
         center = self.center(enc5)
-        print("enc1 shape:", enc1.shape)
-        print("enc2 shape:", enc2.shape)
-        print("enc3 shape:", enc3.shape)
-        print("enc4 shape:", enc4.shape)
-        print("enc5 shape:", enc5.shape)
-        print("center shape:", center.shape)
         dec5 = self.dec5(torch.cat([center, enc5], dim=1))
         dec4 = self.dec4(torch.cat([dec5, enc4], dim=1))
         dec3 = self.dec3(torch.cat([dec4, enc3], dim=1))
         dec2 = self.dec2(torch.cat([dec3, enc2], dim=1))
         dec1 = self.dec1(torch.cat([dec2, enc1], dim=1))
-        print("dec5 shape:", dec5.shape)
-        print("dec4 shape:", dec4.shape)    
-        print("dec3 shape:", dec3.shape)
-        print("dec2 shape:", dec2.shape)
-        print("dec1 shape:", dec1.shape)
-        print("final shape:", self.final_conv(dec1).shape)
         return self.final_conv(dec1)
     
 

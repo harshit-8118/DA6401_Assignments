@@ -1,16 +1,3 @@
-"""inspect_dataset.py — Full dataset audit for Oxford-IIIT Pet.
-
-Reads trainval.txt and test.txt, then reports:
-  - Per-split counts and missing files (images, trimaps, XMLs)
-  - All 37 breed names, species, class IDs
-  - Image and trimap size statistics (min/max/mean H, W)
-  - Which splits have XML coverage gaps (test XMLs are typically absent)
-
-Usage:
-    python inspect_dataset.py
-    python inspect_dataset.py --data_root /path/to/data
-"""
-
 import argparse
 import os
 import xml.etree.ElementTree as ET
@@ -304,21 +291,6 @@ def audit(data_root: str):
     print(f"""
   XMLs missing in trainval : {tv_xml_missing}
   XMLs missing in test     : {te_xml_missing}
-
-  WHY ALL TEST XMLs ARE MISSING:
-    The Oxford-IIIT Pet dataset official release does NOT include
-    bounding-box XML annotations for the test split. This is by design
-    — the test set is evaluation-only and head annotations were only
-    released for trainval.
-
-  WHAT TO DO IN train.py / pets_dataset.py:
-    - For trainval samples with no XML: use full-image fallback
-      bbox = (0.5, 0.5, 1.0, 1.0) in normalised (cx,cy,w,h).
-    - For ALL test samples: they will all use the fallback bbox.
-      This is fine because test is only used for final inference
-      in our pipeline (classifier, segmenter), not localizer eval.
-    - Localizer should only be evaluated on trainval val-split
-      (the 10% held-out from trainval.txt) where XMLs exist.
 """)
 
 

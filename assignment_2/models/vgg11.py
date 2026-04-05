@@ -69,7 +69,6 @@ class VGG11Encoder(nn.Module):
 
         self.head = nn.Sequential(
             # avg pool layer
-            # nn.AdaptiveAvgPool2d(output_size=(7, 7)),
             nn.Flatten(),
             # classifier
             nn.Linear(in_features=7*7*512, out_features=4096, bias=True),

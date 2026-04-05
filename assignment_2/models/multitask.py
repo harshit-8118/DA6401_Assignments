@@ -1,13 +1,12 @@
 """Unified multi-task model
 """
-
 import os
 import torch
 import torch.nn as nn
 
-from .vgg11 import VGG11Encoder
-from .localization import RegressionHead
-from .segmentation import VGG11UNet
+from models.vgg11 import VGG11Encoder
+from models.localization import RegressionHead
+from models.segmentation import VGG11UNet
 
 
 def _load_sd(path, device="cpu"):
@@ -41,10 +40,10 @@ class MultiTaskPerceptionModel(nn.Module):
     ):
         super().__init__()
 
-        #  Download weights if not present 
+        # Download weights if not present
         _IDS = {
             "classifier": "1UbIKWiy7j9M9FgV4MhG_KgePEJNO7B3n",
-            "localizer":  "1uKtLBJ92pmoeYu1G9je86gPfMETj7WtX",
+            "localizer":  "1uMUYkCs0e7ojy0Ko_T-iPLF0glQyeZbm",
             "unet1":      "1XZznmSzs_0S5H3UwFHU5tEsR7Ay3twhv",
             "unet3":      "1GYbIyk7nxF_XAZHDJK14yf43uG_xE9O6",
         }
@@ -80,12 +79,10 @@ class MultiTaskPerceptionModel(nn.Module):
         self._load_seg_decoder(unet_path)
 
     #  Private weight loaders 
-
     def _load_backbone(self, path):
         if not os.path.exists(path):
             print(f"  [backbone]  not found: {path} — random init"); return
         sd = _load_sd(path)
-        # classifier.pth keys: "classifier.enc1.0.0.weight" etc.
         remapped = {
             k[len("classifier."):]: v
             for k, v in sd.items()
@@ -99,7 +96,6 @@ class MultiTaskPerceptionModel(nn.Module):
         if not os.path.exists(path):
             print(f"  [reg_head]  not found: {path} — random init"); return
         sd = _load_sd(path)
-        # localizer.pth keys: "regression_head.pool.*", "regression_head.fc.*"
         remapped = {
             k[len("regression_head."):]: v
             for k, v in sd.items()
@@ -113,7 +109,6 @@ class MultiTaskPerceptionModel(nn.Module):
         if not os.path.exists(path):
             print(f"  [seg_dec]   not found: {path} — random init"); return
         sd = _load_sd(path)
-        # unet.pth keys include "encoder.*" (skip) and decoder keys
         decoder_prefixes = ("center.", "dec4.", "dec3.", "dec2.", "dec1.", "final.")
         remapped = {
             k: v for k, v in sd.items()
@@ -124,18 +119,17 @@ class MultiTaskPerceptionModel(nn.Module):
               f"missing={len(miss)} unexpected={len(unexp)}")
 
     #  Forward 
-
     def forward(self, x: torch.Tensor):
         # One encoder pass — produces classification logits + skip features
         cls_logits, features = self.backbone(x, return_features=True)
-        f1 = features['f1']   # [B,  64, H/2,  W/2 ]
-        f2 = features['f2']   # [B, 128, H/4,  W/4 ]
-        f3 = features['f3']   # [B, 256, H/8,  W/8 ]
-        f4 = features['f4']   # [B, 512, H/16, W/16]
-        f5 = features['f5']   # [B, 512, H/32, W/32]
+        f1 = features['f1']
+        f2 = features['f2']
+        f3 = features['f3']
+        f4 = features['f4']
+        f5 = features['f5']
 
         # Task 2: localisation
-        bbox = self.regression_head(f5)          # [B, 4]
+        bbox = self.regression_head(f5)          
 
         # Task 3: segmentation decoder
         center = self.center(f5)
@@ -144,7 +138,7 @@ class MultiTaskPerceptionModel(nn.Module):
         dec3   = self.dec3(torch.cat([dec4,   f3], dim=1))
         dec2   = self.dec2(torch.cat([dec3,   f2], dim=1))
         dec1   = self.dec1(torch.cat([dec2,   f1], dim=1))
-        seg    = self.final(dec1)                # [B, seg_classes, H, W]
+        seg    = self.final(dec1)                
 
         return {
             "classification": cls_logits,

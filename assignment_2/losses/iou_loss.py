@@ -12,14 +12,8 @@ class IoULoss(nn.Module):
         super().__init__()
         self.eps = eps
         self.reduction = reduction
-        # TODO: validate reduction in {"none", "mean", "sum"}.
 
     def forward(self, pred_boxes: torch.Tensor, target_boxes: torch.Tensor) -> torch.Tensor:
-        """Compute IoU loss between predicted and target bounding boxes.
-        Args:
-            pred_boxes: [B, 4] predicted boxes in (x_center, y_center, width, height) format.
-            target_boxes: [B, 4] target boxes in (x_center, y_center, width, height) format."""
-        # TODO: implement IoU loss.
         pred_x1 = pred_boxes[:, 0] - pred_boxes[:, 2] / 2
         pred_y1 = pred_boxes[:, 1] - pred_boxes[:, 3] / 2
         pred_x2 = pred_boxes[:, 0] + pred_boxes[:, 2] / 2
@@ -51,16 +45,13 @@ class IoULoss(nn.Module):
         
 if __name__ == "__main__":
     loss_fn = IoULoss()
-    # Perfect prediction: loss should be ~0
     boxes = torch.tensor([[0.5, 0.5, 0.4, 0.4]])
     print("Perfect IoU loss:", loss_fn(boxes, boxes).item())  # ~0.0
 
-    # No overlap: loss should be ~1
     pred   = torch.tensor([[0.1, 0.1, 0.1, 0.1]])
     target = torch.tensor([[0.9, 0.9, 0.1, 0.1]])
     print("No-overlap IoU loss:", loss_fn(pred, target).item())  # ~1.0
 
-    # Gradient check
     pred_g = torch.tensor([[0.5, 0.5, 0.3, 0.3]], requires_grad=True)
     tgt_g  = torch.tensor([[0.6, 0.6, 0.4, 0.4]])
     l = loss_fn(pred_g, tgt_g)

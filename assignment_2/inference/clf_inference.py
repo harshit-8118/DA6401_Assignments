@@ -31,7 +31,6 @@ def get_breed_map(data_root):
             if len(parts) < 4: continue
             
             # The 'class_id' in this dataset is typically 1-indexed.
-            # We subtract 1 to match 0-indexed PyTorch labels.
             image_name = parts[0]
             class_id = int(parts[1]) - 1 
             

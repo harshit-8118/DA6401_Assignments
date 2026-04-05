@@ -17,15 +17,9 @@ IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD  = (0.229, 0.224, 0.225)
 
 
-# --------------------------------------------------------------------------- #
+
 #  Transforms                                                                  #
-# --------------------------------------------------------------------------- #
 def get_train_transforms(img_size: int = 224) -> A.Compose:
-    """Clean, generalizing augmentation for fine-grained pet classification.
- 
-    Philosophy: mild geometric + mild colour. Preserve discriminative features.
-    With pretrained backbone, less augmentation generalizes better.
-    """
     bbox_p = A.BboxParams(
         format="yolo", label_fields=["bbox_labels"],
         clip=True, min_visibility=0.3, min_area=100
@@ -67,17 +61,11 @@ def get_val_transforms(img_size: int = 224) -> A.Compose:
         clip=True, min_visibility=0.3,
     ))
 
-# --------------------------------------------------------------------------- #
+
 #  Helper: parse Pascal VOC XML bounding box                                   #
-# --------------------------------------------------------------------------- #
 
-def _parse_bbox_xml(
-    xml_path: pathlib.Path, img_w: int, img_h: int
-) -> Optional[Tuple[float, float, float, float]]:
-    """Parse first <bndbox> and return (cx, cy, w, h) normalised to [0,1].
 
-    Returns None if the file does not exist or has no bndbox element.
-    """
+def _parse_bbox_xml(xml_path: pathlib.Path, img_w: int, img_h: int) -> Optional[Tuple[float, float, float, float]]:
     if not xml_path.exists():
         return None
 
@@ -97,33 +85,14 @@ def _parse_bbox_xml(
     h  = (ymax - ymin) / img_h
 
     if w < 0.01 or h < 0.01:
-        return None   # bad annotation → fallback to (0.5, 0.5, 1.0, 1.0)
+        return None   
     
     return (cx, cy, w, h)
 
 
-# --------------------------------------------------------------------------- #
-#  Dataset                                                                     #
-# --------------------------------------------------------------------------- #
 
+#  Dataset                                                                     #
 class OxfordIIITPetDataset(Dataset):
-    """Oxford-IIIT Pet dataset.
- 
-    Can be constructed in two ways:
- 
-    Way 1 — from split name (original behaviour, for test set):
-        OxfordIIITPetDataset(root=..., split="test")
- 
-    Way 2 — from explicit records + dirs (for train/val after stratified split):
-        OxfordIIITPetDataset(
-            root=...,
-            records=train_records,       # list of (image_id, cls, species, breed)
-            images_dir=root/"images_aug",
-            masks_dir=root/"annotations"/"trimaps_aug",
-            transform=get_train_transforms(),
-        )
-    """
- 
     TRIMAP_REMAP    = {1: 0, 2: 1, 3: 2}
     NUM_SEG_CLASSES = 3
     NUM_BREEDS      = 37
@@ -223,15 +192,12 @@ class OxfordIIITPetDataset(Dataset):
                 out["mask"].long())
 
 
-# --------------------------------------------------------------------------- #
-#  Smoke-test                                                                  #
-# --------------------------------------------------------------------------- #
 
+#  Smoke-test                                                                  #
 if __name__ == "__main__":
     import sys
     import os 
     from torch.utils.data import DataLoader
-
     # Get the directory where pets_dataset.py actually lives
     current_file_dir = os.path.dirname(os.path.abspath(__file__))
     

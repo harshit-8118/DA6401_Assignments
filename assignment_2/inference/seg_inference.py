@@ -35,12 +35,6 @@ def overlay(img_float, mask_np, alpha=0.5):
 
 
 def nc1_pred_to_display(binary_pred):
-    """Map nc=1 pred (1=fg_detected, 0=bg) to MASK_COLORS indices (0=fg-green, 1=bg-red).
-
-    Training used: target = (masks==0).float()  ->  1=fg, 0=bg in pred.
-    MASK_COLORS:   0=fg(green), 1=bg(red), 2=boundary(blue).
-    So pred==1 maps to index 0 (green), pred==0 maps to index 1 (red).
-    """
     out = np.ones_like(binary_pred)    # default: bg -> colour index 1 (red)
     out[binary_pred == 1] = 0          # fg detected -> colour index 0 (green)
     return out
@@ -105,10 +99,6 @@ def draw_grid(all_imgs, all_gt, all_pred, indices, n_rows, n_cols, nc, save_path
             gt_np  = all_gt[idx].numpy()
             pr_np  = all_pred[idx].numpy()
 
-            # For nc=1: remap binary pred to 3-class palette so overlay uses same colours
-            # nc=3: gt/pred already use MASK_COLORS indices {0,1,2}
-            # nc=1: gt still has {0,1,2} trimap values (no remap needed)
-            #        pred has {1=fg,0=bg} from (logits>0).long() — needs remap
             gt_display = gt_np
             pr_display = pr_np if nc == 3 else nc1_pred_to_display(pr_np)
 
@@ -138,9 +128,6 @@ def draw_grid(all_imgs, all_gt, all_pred, indices, n_rows, n_cols, nc, save_path
     plt.close()
     print(f"Saved → {save_path}")
 
-
-# ── Mode 1: val grid ──────────────────────────────────────────────────────────
-
 def run_val_grid(args):
     device = torch.device(args.device)
     nc     = args.seg_classes
@@ -163,8 +150,6 @@ def run_val_grid(args):
     indices  = random.sample(range(len(all_imgs)), n)
     draw_grid(all_imgs, all_gt, all_pred, indices, args.rows, args.cols, nc, args.save)
 
-
-# ── Mode 2: single image ──────────────────────────────────────────────────────
 
 def run_single(args):
     if not args.image_path or not os.path.exists(args.image_path):

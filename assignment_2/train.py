@@ -406,6 +406,7 @@ def train_classifier(args):
         wandb.finish()
     return best_f1
 
+
 def train_localizer(args):
     print(f"\n{'='*60}\nTASK 2: Localisation\n{'='*60}")
     device = args.device
@@ -421,7 +422,7 @@ def train_localizer(args):
     load_backbone_from_classifier(model, CKPT_CLF, encoder_attr="encoder")
  
     mse_fn = nn.MSELoss()
-    iou_fn = IoULoss(reduction="mean")
+    iou_fn = IoULoss(reduction="mean")   # custom IoULoss, inputs must be [0,1]
  
     stage1_end = getattr(args, "loc_stage1", 10)
     stage2_end = stage1_end + getattr(args, "loc_stage2", 5)
@@ -455,7 +456,6 @@ def train_localizer(args):
  
     for epoch in range(1, args.loc_epochs + 1):
  
-        # Progressive unfreeze
         if epoch == stage1_end + 1:
             _unfreeze(model.encoder.enc3)
             optimizer, scheduler = _make_opt_sched(
@@ -477,15 +477,16 @@ def train_localizer(args):
  
         for imgs, _, bboxes_norm, _ in train_loader:
             imgs        = imgs.to(device)
-            bboxes_norm = bboxes_norm.to(device)      # [0,1] normalised targets
+            bboxes_norm = bboxes_norm.to(device)            # [0,1] normalised
+            bboxes_px   = bboxes_norm * IMG_SIZE            # pixel-space targets
  
             optimizer.zero_grad()
-            pred_px   = model(imgs)                   # pixel output [B,4]
-            pred_norm = torch.clamp(pred_px / IMG_SIZE, 0.0, 1.0)  # normalise for loss
+            pred_px   = model(imgs)                         # [B,4] pixel output
+            pred_norm = torch.clamp(pred_px / IMG_SIZE, 0.0, 1.0)  # normalise for IoU
  
-            loss_mse  = mse_fn(pred_norm, bboxes_norm)
-            loss_iou  = iou_fn(pred_norm, bboxes_norm)
-            loss      = loss_mse + loss_iou
+            loss_mse  = mse_fn(pred_px, bboxes_px)         # MSE in pixel space
+            loss_iou  = iou_fn(pred_norm, bboxes_norm)      # IoU in [0,1]
+            loss      = loss_mse / (IMG_SIZE ** 2) + loss_iou  # scale-balanced
  
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -508,32 +509,33 @@ def train_localizer(args):
             for imgs, _, bboxes_norm, _ in val_loader:
                 imgs        = imgs.to(device)
                 bboxes_norm = bboxes_norm.to(device)
+                bboxes_px   = bboxes_norm * IMG_SIZE
                 pred_px     = model(imgs)
                 pred_norm   = torch.clamp(pred_px / IMG_SIZE, 0.0, 1.0)
  
-                l_mse    = mse_fn(pred_norm, bboxes_norm)
+                l_mse    = mse_fn(pred_px, bboxes_px)
                 l_iou    = iou_fn(pred_norm, bboxes_norm)
                 v_mse   += l_mse.item()
                 v_iou_l += l_iou.item()
-                v_total += (l_mse + l_iou).item()
+                v_total += (l_mse / IMG_SIZE**2 + l_iou).item()
                 v_iou_m += iou_metric(pred_norm, bboxes_norm)
  
         n = len(val_loader)
         v_mse /= n; v_iou_l /= n; v_total /= n; v_iou_m /= n
  
         print(f"  Epoch {epoch:3d}/{args.loc_epochs} | "
-              f"train mse={t_mse:.4f} iou_l={t_iou_l:.4f} miou={t_iou_m:.4f} | "
-              f"val   mse={v_mse:.4f} iou_l={v_iou_l:.4f} miou={v_iou_m:.4f}")
+              f"train mse_px={t_mse:.1f} iou_l={t_iou_l:.4f} miou={t_iou_m:.4f} | "
+              f"val   mse_px={v_mse:.1f} iou_l={v_iou_l:.4f} miou={v_iou_m:.4f}")
  
         wandb_log({
             "epoch":                epoch,
             "loc/best_epoch":       epoch if v_iou_m > best_iou else best_epoch,
             "loc/lr":               scheduler.get_last_lr()[0],
-            "loc/train/mse":        t_mse,
+            "loc/train/mse_px":     t_mse,
             "loc/train/iou_loss":   t_iou_l,
             "loc/train/total_loss": t_total,
             "loc/train/mean_iou":   t_iou_m,
-            "loc/val/mse":          v_mse,
+            "loc/val/mse_px":       v_mse,
             "loc/val/iou_loss":     v_iou_l,
             "loc/val/total_loss":   v_total,
             "loc/val/mean_iou":     v_iou_m,

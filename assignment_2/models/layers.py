@@ -37,4 +37,3 @@ if __name__ == "__main__":
     dropout.eval()
     eval_out = dropout(sample_input)
     print(eval_out)
-    # Notice the values are 1.0 (identity mapping)

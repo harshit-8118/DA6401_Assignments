@@ -1,13 +1,3 @@
-"""Localization inference — draws predicted and ground-truth bboxes on test images.
-
-Since test.txt has no XML annotations, ground-truth boxes are not available.
-We draw only predicted boxes (red) with confidence indicated by IoU vs full-image fallback.
-
-Usage:
-    python infer_localizer.py --data_root ./data/oxford-iiit-pet
-    python infer_localizer.py --data_root ./data/oxford-iiit-pet --n 32 --save bbox_results.png
-"""
-
 import os, argparse, random
 import numpy as np
 import torch
@@ -34,7 +24,7 @@ def make_loaders(args, use_aug=True):
     root     = pathlib.Path(args.data_root)
     ann_file = root / "annotations" / "trainval.txt"   
     
-    train_records, val_records = get_stratified_split(
+    _, val_records = get_stratified_split(
         ann_file, val_frac=0.1, seed=args.seed)
     
  
@@ -53,10 +43,6 @@ def make_loaders(args, use_aug=True):
                               shuffle=False, drop_last=False, **kw)
  
     print(f" Val: {len(val_ds)}")
-    print(f"  Train IDs: {len(train_records)} originals "
-          f"+ their aug copies in images_aug/")
-    print(f"  Val   IDs: {len(val_records)} originals only "
-          f"(NEVER seen during training)")
     return val_loader
  
 
@@ -96,10 +82,10 @@ def iou_single(pred, gt):
 
 def run_inference(args):
     device = torch.device(args.device)
-    # ── Dataset & loader ─────────────────────────────────────────────────
+    # Dataset & loader 
     loader = make_loaders(args)
 
-    # ── Model ────────────────────────────────────────────────────────────
+    # Model 
     model = VGG11Localizer(freeze_backbone=False).to(device)
     if os.path.exists(CKPT_LOC):
         ckpt = torch.load(CKPT_LOC, map_location=device, weights_only=True)
@@ -109,7 +95,7 @@ def run_inference(args):
         print(f"Warning: {CKPT_LOC} not found — using random weights")
     model.eval()
 
-    # ── Collect predictions ───────────────────────────────────────────────
+    # Collect predictions
     all_imgs, all_preds, all_gt_bboxes, all_labels = [], [], [], []
 
     with torch.no_grad():
@@ -128,7 +114,7 @@ def run_inference(args):
 
     print(f"Total test samples: {len(all_imgs)}")
 
-    # ── Sample n random images ───────────────────────────────────────────
+    # Sample n random images
     n = min(args.n, len(all_imgs))
     indices = random.sample(range(len(all_imgs)), n)
 
@@ -136,7 +122,7 @@ def run_inference(args):
     rows = (n + cols - 1) // cols
     fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 4))
     axes = np.array(axes).ravel()
-
+    avg_iou = 0
     for plot_i, idx in enumerate(indices):
         ax  = axes[plot_i]
         img = unnorm(all_imgs[idx])
@@ -146,15 +132,13 @@ def run_inference(args):
         gt   = all_gt_bboxes[idx].numpy()   # (cx,cy,w,h) normalised (fallback for test)
         iou  = iou_single(pred, gt)
 
+        avg_iou += iou
+
         ax.imshow(img)
 
         # Predicted box — RED
         draw_box(ax, pred[0], pred[1], pred[2], pred[3], H, W,
                  color='red', label=f"pred IoU={iou:.2f}")
-
-        # GT box — GREEN (note: test GT is fallback (0.5,0.5,1,1) if no XML)
-        # draw_box(ax, gt[0], gt[1], gt[2], gt[3], H, W,
-        #          color='lime', label="gt (fallback)")
 
         ax.set_title(f"cls={all_labels[idx].item()}  IoU={iou:.2f}", fontsize=8)
         ax.axis('off')
@@ -175,9 +159,10 @@ def run_inference(args):
     plt.close()
     print(f"Saved → {args.save}")
 
-    # ── Summary stats ────────────────────────────────────────────────────
+    # Summary stats 
     all_ious = [iou_single(all_preds[i].numpy(), all_gt_bboxes[i].numpy())
                 for i in range(len(all_preds))]
+    print(f"Mean IoU of samples: {avg_iou / n}")
     print(f"Mean IoU (vs fallback gt): {np.mean(all_ious):.4f}")
 
 

@@ -9,11 +9,6 @@ import albumentations as A
 
 
 BORDER_REFLECT = 4   # BORDER_REFLECT_101 integer value
-
-# ── 4 augmentation policies ─────────────────────────────────────────────────
-# Each policy is deterministic per call but randomly sampled internally.
-# Using p=1.0 on the outer Compose so every image is always transformed.
-
 def policy_geometric(size=224):
     """Flip + mild crop + rotation. Preserves colour exactly."""
     return A.Compose([
@@ -84,9 +79,6 @@ POLICIES = [
     policy_degradation,
 ]
 
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
 def parse_ann_file(path: pathlib.Path):
     records = []
     with open(path) as f:
@@ -116,9 +108,6 @@ def parse_xml_bbox(xml_path: pathlib.Path, img_w: int, img_h: int
         return (cx, cy, w, h)
     except Exception:
         return None
-
-
-# ── Main ─────────────────────────────────────────────────────────────────────
 
 def generate(data_root: str, copies: int = 4, img_size: int = 224,
              seed: int = 42):

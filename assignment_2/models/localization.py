@@ -3,23 +3,22 @@
 
 import torch
 import torch.nn as nn
-from .vgg11 import VGG11Encoder
-from .layers import CustomDropout
+from models.vgg11 import VGG11Encoder
+from models.layers import CustomDropout
 
 IMG_SIZE = 224
 class RegressionHead(nn.Module):
     """Regression head for bounding box prediction."""
-
     def __init__(self, dropout_p: float = 0.5):
         super(RegressionHead, self).__init__()
-        self.pool = nn.AdaptiveAvgPool2d((7, 7))
+        kern = 3
+        self.pool = nn.AdaptiveAvgPool2d((kern, kern))
         self.flatten = nn.Flatten()
         self.fc = nn.Sequential(    
-            nn.Linear(512 * 7 * 7, 2048, bias=True),
+            nn.Linear(512 * kern * kern, 512, bias=True),
             nn.ReLU(inplace=True),
             CustomDropout(p=dropout_p),
-            nn.Linear(2048, 4, bias=True),
-            nn.ReLU(inplace=True), 
+            nn.Linear(512, 4, bias=True),
         )
         self._init_weights()    
  
@@ -28,7 +27,7 @@ class RegressionHead(nn.Module):
         nn.init.constant_(self.fc[0].bias, 0.0)
         # Last layer: small weights + bias at image center
         nn.init.xavier_uniform_(self.fc[3].weight, gain=0.1)
-        # nn.init.constant_(self.fc[3].bias, IMG_SIZE / 2)
+        nn.init.constant_(self.fc[3].bias, IMG_SIZE / 2)
 
     def forward(self, f5: torch.Tensor) -> torch.Tensor:
         """Forward pass for regression head.
@@ -66,7 +65,7 @@ class VGG11Localizer(nn.Module):
 
 if __name__ == "__main__":
     model = VGG11Localizer()
-    dummy = torch.randn(2, 3, 224, 224)
+    dummy = torch.randn(1, 3, 224, 224)
     out = model(dummy)
     print("Localizer output:", out.shape)   # [2, 4]
     print("Values in [0,1]:", out.min().item(), out.max().item())

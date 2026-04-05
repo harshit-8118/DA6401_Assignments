@@ -4,26 +4,7 @@ import numpy as np
 from sklearn.model_selection import StratifiedShuffleSplit
 
 
-def get_stratified_split(
-    ann_file: str,
-    val_frac: float = 0.1,
-    seed: int = 42,
-) -> Tuple[List[Tuple[str,int,int,int]], List[Tuple[str,int,int,int]]]:
-    """Stratified split of trainval.txt into train and val record lists.
-
-    Args:
-        ann_file : path to trainval.txt (NOT trainval_aug.txt)
-        val_frac : fraction of originals to reserve for validation
-        seed     : random seed for reproducibility
-
-    Returns:
-        train_records : list of (image_id, class_id, species, breed_id)
-        val_records   : same format, disjoint from train_records
-
-    Both lists contain ORIGINAL image IDs only.
-    The caller is responsible for pointing train to images_aug/ and
-    val to images/ (see make_loaders in train.py).
-    """
+def get_stratified_split(ann_file: str, val_frac: float = 0.1, seed: int = 42,) -> Tuple[List[Tuple[str,int,int,int]], List[Tuple[str,int,int,int]]]:
     path = pathlib.Path(ann_file)
     if not path.exists():
         raise FileNotFoundError(f"Annotation file not found: {path}")

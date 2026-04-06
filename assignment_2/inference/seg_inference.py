@@ -203,7 +203,7 @@ if __name__ == "__main__":
     ap.add_argument("--num_workers", type=int, default=4)
     ap.add_argument("--seed",        type=int, default=42)
     ap.add_argument("--seg_classes", type=int, default=3, choices=[1,3])
-    ap.add_argument("--save",        default="seg_results.png")
+    ap.add_argument("--save",        default="inference/seg_results.png")
     ap.add_argument("--device",      default="cuda:1" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 

@@ -573,7 +573,8 @@ def train_segmentation(args):
     model = VGG11UNet(num_classes=nc, in_channels=3,
                       dropout_p=args.dropout_p).to(device)
     load_backbone_from_classifier(model, CKPT_CLF, encoder_attr="encoder")
- 
+    use_amp = (device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
     if nc == 1:
         # Binary: foreground vs rest
         criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([3.0]).to(device))
@@ -617,32 +618,57 @@ def train_segmentation(args):
         for imgs, _, _, masks in train_loader:
             imgs  = imgs.to(device)
             masks = masks.to(device)
- 
-            optimizer.zero_grad()
-            logits = model(imgs)
- 
-            if nc == 1:
-                target = (masks != 1).float()
-                logits_sq = logits.squeeze(1)
-                bce_loss = criterion(logits_sq, target)
-                d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
-                loss = bce_loss + d_loss
-                preds = (logits_sq > 0).long()
-                current_target = target.long().cpu()  
+
+            optimizer.zero_grad(set_to_none=True)
+
+            if use_amp:
+                with torch.amp.autocast("cuda"):
+                    logits = model(imgs)
+                    if nc == 1:
+                        target = (masks != 1).float()
+                        logits_sq = logits.squeeze(1)
+                        bce_loss = criterion(logits_sq, target)
+                        d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
+                        loss = bce_loss + d_loss
+                        preds = (logits_sq > 0).long()
+                        current_target = target.long().cpu()
+                    else:
+                        ce_loss = criterion(logits, masks)
+                        d_loss = dice_loss_fn(logits, masks, nc)
+                        loss = ce_loss + d_loss
+                        preds = logits.argmax(1)
+                        current_target = masks.cpu()
+
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                scaler.step(optimizer)
+                scaler.update()
             else:
-                ce_loss   = criterion(logits, masks)
-                d_loss    = dice_loss_fn(logits, masks, nc)
-                loss      = ce_loss + d_loss          # CE + Dice
-                preds     = logits.argmax(1)
-                current_target = masks.cpu()
- 
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-            optimizer.step()
+                logits = model(imgs)
+                if nc == 1:
+                    target = (masks != 1).float()
+                    logits_sq = logits.squeeze(1)
+                    bce_loss = criterion(logits_sq, target)
+                    d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
+                    loss = bce_loss + d_loss
+                    preds = (logits_sq > 0).long()
+                    current_target = target.long().cpu()
+                else:
+                    ce_loss = criterion(logits, masks)
+                    d_loss = dice_loss_fn(logits, masks, nc)
+                    loss = ce_loss + d_loss
+                    preds = logits.argmax(1)
+                    current_target = masks.cpu()
+
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                optimizer.step()
+
             t_loss += loss.item()
             all_pred.append(preds.detach().cpu())
             all_tgt.append(current_target)
- 
+
         t_loss    /= len(train_loader)
         t_pred_all = torch.cat(all_pred)
         t_tgt_all  = torch.cat(all_tgt)
@@ -658,30 +684,50 @@ def train_segmentation(args):
             for imgs, _, _, masks in val_loader:
                 imgs  = imgs.to(device)
                 masks = masks.to(device)
-                logits = model(imgs)
-                if nc == 1:
-                    target = (masks != 1).float()
-                    logits_sq = logits.squeeze(1)
-                    bce_loss = criterion(logits_sq, target)
-                    d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
-                    loss = bce_loss + d_loss
-                    preds = (logits_sq > 0).long()
-                    current_target = target.long().cpu()  
+
+                if use_amp:
+                    with torch.amp.autocast("cuda"):
+                        logits = model(imgs)
+                        if nc == 1:
+                            target = (masks != 1).float()
+                            logits_sq = logits.squeeze(1)
+                            bce_loss = criterion(logits_sq, target)
+                            d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
+                            loss = bce_loss + d_loss
+                            preds = (logits_sq > 0).long()
+                            current_target = target.long().cpu()
+                        else:
+                            ce_loss = criterion(logits, masks)
+                            d_loss = dice_loss_fn(logits, masks, nc)
+                            loss = ce_loss + d_loss
+                            preds = logits.argmax(1)
+                            current_target = masks.cpu()
                 else:
-                    ce_loss   = criterion(logits, masks)
-                    d_loss    = dice_loss_fn(logits, masks, nc)
-                    loss      = ce_loss + d_loss          # CE + Dice
-                    preds     = logits.argmax(1)
-                    current_target = masks.cpu()
+                    logits = model(imgs)
+                    if nc == 1:
+                        target = (masks != 1).float()
+                        logits_sq = logits.squeeze(1)
+                        bce_loss = criterion(logits_sq, target)
+                        d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
+                        loss = bce_loss + d_loss
+                        preds = (logits_sq > 0).long()
+                        current_target = target.long().cpu()
+                    else:
+                        ce_loss = criterion(logits, masks)
+                        d_loss = dice_loss_fn(logits, masks, nc)
+                        loss = ce_loss + d_loss
+                        preds = logits.argmax(1)
+                        current_target = masks.cpu()
 
                 v_loss += loss.item()
                 all_pred.append(preds.cpu())
                 all_tgt.append(current_target)
- 
+
         v_loss    /= len(val_loader)
         v_pred_all = torch.cat(all_pred)
         v_tgt_all  = torch.cat(all_tgt)
         v_m        = seg_metrics(v_pred_all, v_tgt_all, num_classes=metrics_nc)
+
  
         print(f"  Epoch {epoch:3d}/{args.seg_epochs} | "
               f"train loss={t_loss:.4f} dice={t_m['mean_dice']:.4f} px_acc={t_m['px_accuracy']:.4f} | "
@@ -734,31 +780,51 @@ def train_segmentation(args):
         for imgs, _, _, masks in test_loader:
             imgs  = imgs.to(device)
             masks = masks.to(device)
-            logits = model(imgs)
-            if nc == 1:
-                target = (masks != 1).float()
-                logits_sq = logits.squeeze(1)
-                bce_loss = criterion(logits_sq, target)
-                d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
-                loss = bce_loss + d_loss
-                preds = (logits_sq > 0).long()
-                current_target = target.long().cpu()  
+
+            if use_amp:
+                with torch.amp.autocast("cuda"):
+                    logits = model(imgs)
+                    if nc == 1:
+                        target = (masks != 1).float()
+                        logits_sq = logits.squeeze(1)
+                        bce_loss = criterion(logits_sq, target)
+                        d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
+                        loss = bce_loss + d_loss
+                        preds = (logits_sq > 0).long()
+                        current_target = target.long().cpu()
+                    else:
+                        ce_loss = criterion(logits, masks)
+                        d_loss = dice_loss_fn(logits, masks, nc)
+                        loss = ce_loss + d_loss
+                        preds = logits.argmax(1)
+                        current_target = masks.cpu()
             else:
-                ce_loss   = criterion(logits, masks)
-                d_loss    = dice_loss_fn(logits, masks, nc)
-                loss      = ce_loss + d_loss          # CE + Dice
-                preds     = logits.argmax(1)
-                current_target = masks.cpu()
+                logits = model(imgs)
+                if nc == 1:
+                    target = (masks != 1).float()
+                    logits_sq = logits.squeeze(1)
+                    bce_loss = criterion(logits_sq, target)
+                    d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
+                    loss = bce_loss + d_loss
+                    preds = (logits_sq > 0).long()
+                    current_target = target.long().cpu()
+                else:
+                    ce_loss = criterion(logits, masks)
+                    d_loss = dice_loss_fn(logits, masks, nc)
+                    loss = ce_loss + d_loss
+                    preds = logits.argmax(1)
+                    current_target = masks.cpu()
 
             te_loss += loss.item()
             all_pred.append(preds.cpu())
             all_tgt.append(current_target)
- 
+
     te_loss /= len(test_loader)
     te_pred  = torch.cat(all_pred)
     te_tgt   = torch.cat(all_tgt)
     metrics_nc = 2 if nc == 1 else nc
     te_m     = seg_metrics(te_pred, te_tgt, metrics_nc)
+
  
     print(f"  [TEST] loss={te_loss:.4f} dice={te_m['mean_dice']:.4f} "
           f"px_acc={te_m['px_accuracy']:.4f} f1_macro={te_m['f1_macro']:.4f}")
@@ -834,7 +900,7 @@ if __name__ == "__main__":
         train_segmentation(args)
 
     print("\nDone. Checkpoints saved:")
-    for ck in [CKPT_CLF, CKPT_LOC, CKPT_SEG]:
+    for ck in [CKPT_CLF, CKPT_LOC, f"{CKPT_SEG}_{args.seg_classes}.pth"]:
         print(f"  {ck}  {'✓' if os.path.exists(ck) else '(not trained)'}")
 
 

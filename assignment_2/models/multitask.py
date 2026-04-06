@@ -6,7 +6,7 @@ import torch.nn as nn
 
 from models.vgg11 import VGG11Encoder
 from models.localization import RegressionHead
-from models.segmentation import VGG11UNet
+from models.segmentation import VGG11UNet, UpBlock
 
 
 def _load_sd(path, device="cpu"):
@@ -70,7 +70,8 @@ class MultiTaskPerceptionModel(nn.Module):
         self.dec3   = _unet.dec3
         self.dec2   = _unet.dec2
         self.dec1   = _unet.dec1
-        self.final  = _unet.final_conv   
+        self.final_up = _unet.final_up
+        self.final_conv  = _unet.final_conv   
         del _unet
 
         #  Load pretrained weights 
@@ -133,12 +134,13 @@ class MultiTaskPerceptionModel(nn.Module):
 
         # Task 3: segmentation decoder
         center = self.center(f5)
-        dec5   = self.dec5(torch.cat([center, f5], dim=1))
-        dec4   = self.dec4(torch.cat([dec5, f4], dim=1))
-        dec3   = self.dec3(torch.cat([dec4,   f3], dim=1))
-        dec2   = self.dec2(torch.cat([dec3,   f2], dim=1))
-        dec1   = self.dec1(torch.cat([dec2,   f1], dim=1))
-        seg    = self.final(dec1)                
+        dec5   = self.dec5(center, f5)
+        dec4   = self.dec4(dec5, f4)
+        dec3   = self.dec3(dec4, f3)
+        dec2   = self.dec2(dec3, f2)
+        dec1   = self.dec1(dec2, f1)
+        dec1   = self.final_up(dec1)
+        seg    = self.final_conv(dec1)                
 
         return {
             "classification": cls_logits,

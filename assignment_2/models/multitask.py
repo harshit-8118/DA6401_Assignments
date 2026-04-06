@@ -45,7 +45,7 @@ class MultiTaskPerceptionModel(nn.Module):
             "classifier": "1UbIKWiy7j9M9FgV4MhG_KgePEJNO7B3n",
             "localizer":  "1uMUYkCs0e7ojy0Ko_T-iPLF0glQyeZbm",
             "unet1":      "1XZznmSzs_0S5H3UwFHU5tEsR7Ay3twhv",
-            "unet3":      "1GYbIyk7nxF_XAZHDJK14yf43uG_xE9O6",
+            "unet3":      "1QCukqGob1aKBS5qPiaCuYXPmgaHJxUza",
         }
         unet_id = _IDS["unet3"] if seg_classes == 3 else _IDS["unet1"]
         _maybe_download(classifier_path, _IDS["classifier"])
@@ -110,12 +110,15 @@ class MultiTaskPerceptionModel(nn.Module):
         if not os.path.exists(path):
             print(f"  [seg_dec]   not found: {path} — random init"); return
         sd = _load_sd(path)
-        decoder_prefixes = ("center.", "dec4.", "dec3.", "dec2.", "dec1.", "final.")
+        decoder_prefixes = ("center.", "dec5.", "dec4.", "dec3.", "dec2.", "dec1.", "final_up.", "final_conv.")
         remapped = {
             k: v for k, v in sd.items()
             if any(k.startswith(p) for p in decoder_prefixes)
         }
         miss, unexp = self.load_state_dict(remapped, strict=False)
+        decoder_miss = [m for m in miss if m.startswith(("center.", "dec", "final_"))]
+        print(f"[seg_dec] missing decoder keys: {len(decoder_miss)}")
+
         print(f"  [seg_dec]   loaded {len(remapped)} tensors | "
               f"missing={len(miss)} unexpected={len(unexp)}")
 
@@ -141,7 +144,7 @@ class MultiTaskPerceptionModel(nn.Module):
         dec1   = self.dec1(dec2, f1)
         dec1   = self.final_up(dec1)
         seg    = self.final_conv(dec1)                
-
+        seg += 1
         return {
             "classification": cls_logits,
             "localization":   bbox,

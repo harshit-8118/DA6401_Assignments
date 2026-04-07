@@ -61,7 +61,10 @@ from wandb_utils import (
     lr_sweep_probe, 
     accuracy_loss_comparision_plots,
     make_confusion_map, 
-    extract_label_from_filename
+    extract_label_from_filename, 
+    plot_overlay_clf, 
+    plot_overlay_loc,
+    plot_overlay_seg    
 )
 
 # ── constants ─────────────────────────────────────────────────────────────────
@@ -908,64 +911,75 @@ def task_2_7(args):
 # 2.8 — Meta-Analysis: Combined metric plots
 # ═══════════════════════════════════════════════════════════════════════════════
 def task_2_8(args):
+    import os
     device = get_device()
     run = wandb.init(project=args.wandb_project, name="2.8-meta-analysis", entity=ENTITY_NAME,
-                     tags=["report","2.8"])
+                     tags=["report", "2.8"])
 
-    def plot_overlay(npz_path, title, pairs, out_path):
-        data = np.load(npz_path)
-        fig, ax = plt.subplots(figsize=(7,5))
-        for (k_train, k_val, label, color) in pairs:
-            ax.plot(data["epoch"], data[k_train], color=color, linestyle='-',  label=f"{label} train")
-            ax.plot(data["epoch"], data[k_val],   color=color, linestyle='--', label=f"{label} val")
-        ax.set_title(title); ax.set_xlabel("Epoch"); ax.set_ylabel("Metric")
-        ax.legend(); ax.grid(True)
-        plt.tight_layout(); plt.savefig(out_path, dpi=120); plt.close()
-        return out_path
+    # --- Helpers ---
+    def ensure_dir(path):
+        os.makedirs(path, exist_ok=True)
 
     # --- Load + plot histories ---
-    if os.path.exists("history/clf_history.npz"):
-        p = plot_overlay(
-            "history/clf_history.npz",
-            "Classification: Loss & Accuracy",
-            [
-                ("train_loss","val_loss","Loss","tab:red"),
-                ("train_acc","val_acc","Accuracy","tab:blue"),
-            ],
-            "2.8_clf_curves.png"
-        )
-        run.log({"2.8/clf_curves": wandb.Image(p)})
+    api = wandb.Api()
 
-    if os.path.exists("history/loc_history.npz"):
-        p = plot_overlay(
-            "history/loc_history.npz",
-            "Localization: Loss & IoU",
-            [
-                ("train_loss","val_loss","Loss","tab:orange"),
-                ("train_iou","val_iou","IoU","tab:green"),
-            ],
-            "2.8_loc_curves.png"
-        )
-        run.log({"2.8/loc_curves": wandb.Image(p)})
+    # ----- Classification -----
+    clf_run = api.run("da25s003-indian-institute-of-technology-madras/DA6402-Assignment-2_v1/osg1mhw9")
+    clf_keys = [
+        "epoch",
+        "clf/train/f1_macro", "clf/val/f1_macro",
+        "clf/train/loss",     "clf/val/loss",
+        "clf/train/accuracy", "clf/val/accuracy"
+    ]
+    clf_df = clf_run.history(keys=clf_keys, pandas=False)
+    ensure_dir("clf_plots")
+    clf_loss_path, clf_acc_path, clf_f1_path = plot_overlay_clf(df=clf_df, out_dir="clf_plots")
 
-    if os.path.exists("history/seg_history.npz"):
-        p = plot_overlay(
-            "history/seg_history.npz",
-            "Segmentation: Loss, Dice, Pixel Acc",
-            [
-                ("train_loss","val_loss","Loss","tab:red"),
-                ("train_dice","val_dice","Dice","tab:green"),
-                ("train_pxacc","val_pxacc","PixAcc","tab:blue"),
-            ],
-            "2.8_seg_curves.png"
-        )
-        run.log({"2.8/seg_curves": wandb.Image(p)})
+    run.log({
+        "2.8/clf_loss_overlay": wandb.Image(clf_loss_path),
+        "2.8/clf_acc_overlay":  wandb.Image(clf_acc_path),
+        "2.8/clf_f1_overlay":   wandb.Image(clf_f1_path),
+    })
 
-    # --- Final metric summary (your existing block) ---
-    # (keep your existing evaluation code below)
-    # ...
+    # ----- Localization -----
+    loc_run = api.run("da25s003-indian-institute-of-technology-madras/DA6402-Assignment-2_v1/70v45q7r")
+    loc_keys = [
+        "epoch",
+        "loc/val/mse", "loc/val/iou_loss", "loc/val/total_loss", "loc/val/mean_iou",
+        "loc/train/mse", "loc/train/iou_loss", "loc/train/total_loss", "loc/train/mean_iou",
+    ]
+    loc_df = loc_run.history(keys=loc_keys, pandas=False)
+    ensure_dir("loc_plots")
+
+    loc_total_path, loc_iou_path, loc_miou_path, loc_mse_path = plot_overlay_loc(df=loc_df, out_dir="loc_plots")
+
+    run.log({
+        "2.8/loc_total_loss": wandb.Image(loc_total_path),
+        "2.8/loc_iou_loss":   wandb.Image(loc_iou_path),
+        "2.8/loc_mse_loss":   wandb.Image(loc_mse_path),
+        "2.8/loc_mean_iou":   wandb.Image(loc_miou_path),
+    })
+
+    # ----- Segmentation -----
+    seg_run = api.run("da25s003-indian-institute-of-technology-madras/DA6402-Assignment-2_v1/4exnq8fz")
+    seg_keys = [
+        "epoch",
+        "seg/train/loss", "seg/val/loss",
+        "seg/train/mean_dice", "seg/val/mean_dice",
+        "seg/train/px_accuracy", "seg/val/px_accuracy",
+    ]
+    seg_df = seg_run.history(keys=seg_keys, pandas=False)
+    ensure_dir("seg_plots")
+    seg_loss_path, seg_dice_path, seg_px_path = plot_overlay_seg(df=seg_df, out_dir="seg_plots")
+
+    run.log({
+        "2.8/seg_loss":       wandb.Image(seg_loss_path),
+        "2.8/seg_mean_dice":  wandb.Image(seg_dice_path),
+        "2.8/seg_px_accuracy":wandb.Image(seg_px_path),
+    })
 
     run.finish()
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Entry point

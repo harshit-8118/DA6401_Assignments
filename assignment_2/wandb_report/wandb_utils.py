@@ -326,3 +326,139 @@ def extract_label_from_filename(path):
     name = os.path.splitext(base)[0]
     # take text before first underscore
     return name
+
+# Task 8 utils
+def _series(hist, key):
+    # hist can be list of dicts or a DataFrame
+    if isinstance(hist, list):
+        vals = [row.get(key, np.nan) for row in hist]
+        return np.array([v if v is not None else np.nan for v in vals], dtype=float)
+    return hist[key].to_numpy()
+
+def _x_axis(hist, candidates):
+    for k in candidates:
+        if isinstance(hist, list):
+            vals = [row.get(k) for row in hist]
+            if any(v is not None for v in vals):
+                return np.array([v if v is not None else np.nan for v in vals], dtype=float), k
+        else:
+            if k in hist.columns and hist[k].notna().any():
+                return hist[k].to_numpy(), k
+    # fallback to step index
+    length = len(hist) if isinstance(hist, list) else len(hist.index)
+    return np.arange(length), "Step"
+
+def plot_overlay_clf(df, out_dir=".", prefix="clf"):
+    x, xlab = _x_axis(df, ["clf_epochs", "epoch"])
+
+    # Loss
+    fig, ax = plt.subplots(figsize=(6,4))
+    ax.plot(x, _series(df, "clf/train/loss"), label="train loss")
+    ax.plot(x, _series(df, "clf/val/loss"),   label="val loss")
+    ax.set_title("Classification Loss (Train vs Val)")
+    ax.set_xlabel(xlab); ax.set_ylabel("Loss")
+    ax.legend(); ax.grid(True)
+    loss_path = f"{out_dir}/{prefix}_loss_overlay.png"
+    plt.tight_layout(); plt.savefig(loss_path, dpi=120); plt.close()
+
+    # Accuracy
+    fig, ax = plt.subplots(figsize=(6,4))
+    ax.plot(x, _series(df, "clf/train/accuracy"), label="train acc")
+    ax.plot(x, _series(df, "clf/val/accuracy"),   label="val acc")
+    ax.set_title("Classification Accuracy (Train vs Val)")
+    ax.set_xlabel(xlab); ax.set_ylabel("Accuracy")
+    ax.legend(); ax.grid(True)
+    acc_path = f"{out_dir}/{prefix}_acc_overlay.png"
+    plt.tight_layout(); plt.savefig(acc_path, dpi=120); plt.close()
+
+    # F1 macro
+    fig, ax = plt.subplots(figsize=(6,4))
+    ax.plot(x, _series(df, "clf/train/f1_macro"), label="train F1-macro")
+    ax.plot(x, _series(df, "clf/val/f1_macro"),   label="val F1-macro")
+    ax.set_title("Classification F1-macro (Train vs Val)")
+    ax.set_xlabel(xlab); ax.set_ylabel("F1-macro")
+    ax.legend(); ax.grid(True)
+    f1_path = f"{out_dir}/{prefix}_f1_overlay.png"
+    plt.tight_layout(); plt.savefig(f1_path, dpi=120); plt.close()
+
+    return loss_path, acc_path, f1_path
+
+def plot_overlay_loc(df, out_dir=".", prefix="loc"):
+    x, xlab = _x_axis(df, ["loc_epochs", "epoch"])
+
+    # Total Loss
+    fig, ax = plt.subplots(figsize=(6,4))
+    ax.plot(x, _series(df, "loc/train/total_loss"), label="train total")
+    ax.plot(x, _series(df, "loc/val/total_loss"),   label="val total")
+    ax.set_title("Localization Total Loss (Train vs Val)")
+    ax.set_xlabel(xlab); ax.set_ylabel("Loss")
+    ax.legend(); ax.grid(True)
+    total_path = f"{out_dir}/{prefix}_total_loss_overlay.png"
+    plt.tight_layout(); plt.savefig(total_path, dpi=120); plt.close()
+
+    # IoU Loss
+    fig, ax = plt.subplots(figsize=(6,4))
+    ax.plot(x, _series(df, "loc/train/iou_loss"), label="train IoU loss")
+    ax.plot(x, _series(df, "loc/val/iou_loss"),   label="val IoU loss")
+    ax.set_title("Localization IoU Loss (Train vs Val)")
+    ax.set_xlabel(xlab); ax.set_ylabel("IoU Loss")
+    ax.legend(); ax.grid(True)
+    iou_path = f"{out_dir}/{prefix}_iou_loss_overlay.png"
+    plt.tight_layout(); plt.savefig(iou_path, dpi=120); plt.close()
+
+    # MSE
+    fig, ax = plt.subplots(figsize=(6,4))
+    ax.plot(x, _series(df, "loc/train/mse"), label="train MSE")
+    ax.plot(x, _series(df, "loc/val/mse"),   label="val MSE")
+    ax.set_title("Localization MSE (Train vs Val)")
+    ax.set_xlabel(xlab); ax.set_ylabel("MSE")
+    ax.legend(); ax.grid(True)
+    mse_path = f"{out_dir}/{prefix}_mse_overlay.png"
+    plt.tight_layout(); plt.savefig(mse_path, dpi=120); plt.close()
+
+    # Mean IoU
+    fig, ax = plt.subplots(figsize=(6,4))
+    ax.plot(x, _series(df, "loc/train/mean_iou"), label="train mIoU")
+    ax.plot(x, _series(df, "loc/val/mean_iou"),   label="val mIoU")
+    ax.set_title("Localization Mean IoU (Train vs Val)")
+    ax.set_xlabel(xlab); ax.set_ylabel("Mean IoU")
+    ax.legend(); ax.grid(True)
+    miou_path = f"{out_dir}/{prefix}_miou_overlay.png"
+    plt.tight_layout(); plt.savefig(miou_path, dpi=120); plt.close()
+
+    return total_path, iou_path, mse_path, miou_path
+
+def plot_overlay_seg(df, out_dir=".", prefix="seg"):
+    x, xlab = _x_axis(df, ["seg_epochs", "epoch"])
+
+    # Loss
+    fig, ax = plt.subplots(figsize=(6,4))
+    ax.plot(x, _series(df, "seg/train/loss"), label="train loss")
+    ax.plot(x, _series(df, "seg/val/loss"),   label="val loss")
+    ax.set_title("Segmentation Loss (Train vs Val)")
+    ax.set_xlabel(xlab); ax.set_ylabel("Loss")
+    ax.legend(); ax.grid(True)
+    loss_path = f"{out_dir}/{prefix}_loss_overlay.png"
+    plt.tight_layout(); plt.savefig(loss_path, dpi=120); plt.close()
+
+    # Dice
+    fig, ax = plt.subplots(figsize=(6,4))
+    ax.plot(x, _series(df, "seg/train/mean_dice"), label="train dice")
+    ax.plot(x, _series(df, "seg/val/mean_dice"),   label="val dice")
+    ax.set_title("Segmentation Mean Dice (Train vs Val)")
+    ax.set_xlabel(xlab); ax.set_ylabel("Dice")
+    ax.legend(); ax.grid(True)
+    dice_path = f"{out_dir}/{prefix}_dice_overlay.png"
+    plt.tight_layout(); plt.savefig(dice_path, dpi=120); plt.close()
+
+    # Pixel Acc
+    fig, ax = plt.subplots(figsize=(6,4))
+    ax.plot(x, _series(df, "seg/train/px_accuracy"), label="train px-acc")
+    ax.plot(x, _series(df, "seg/val/px_accuracy"),   label="val px-acc")
+    ax.set_title("Segmentation Pixel Accuracy (Train vs Val)")
+    ax.set_xlabel(xlab); ax.set_ylabel("Pixel Accuracy")
+    ax.legend(); ax.grid(True)
+    px_path = f"{out_dir}/{prefix}_pxacc_overlay.png"
+    plt.tight_layout(); plt.savefig(px_path, dpi=120); plt.close()
+
+    return loss_path, dice_path, px_path

@@ -22,7 +22,6 @@ from models.segmentation   import VGG11UNet
 from losses.iou_loss import IoULoss
 from data.pets_dataset import OxfordIIITPetDataset, get_train_transforms, get_val_transforms
 from data.stratified_split import get_stratified_split
-
 IMG_SIZE   = 224
 NUM_BREEDS = 37
 os.makedirs("checkpoints", exist_ok=True)
@@ -30,6 +29,7 @@ os.makedirs("checkpoints", exist_ok=True)
 CKPT_CLF   = os.path.join("checkpoints", "classifier.pth")
 CKPT_LOC   = os.path.join("checkpoints", "localizer.pth")
 CKPT_SEG   = os.path.join("checkpoints", "unet")
+ENTITY_NAME = 'da25s003-indian-institute-of-technology-madras'
 
 def set_seed(seed: int = 42):
     """Fix seed at hardware level for full reproducibility."""
@@ -255,7 +255,7 @@ def train_classifier(args):
     device = args.device
 
     if args.use_wandb:
-        wandb.init(project=args.wandb_project, name="task1-classifier",
+        wandb.init(project=args.wandb_project, name="task1-classifier", entity=ENTITY_NAME,
                    config=vars(args), reinit=True)
 
     train_loader, val_loader, test_loader = make_loaders(args)
@@ -412,7 +412,7 @@ def train_localizer(args):
     device = args.device
  
     if args.use_wandb:
-        wandb.init(project=args.wandb_project, name="task2-localizer",
+        wandb.init(project=args.wandb_project, name="task2-localizer", entity=ENTITY_NAME,
                    config=vars(args), reinit=True)
  
     train_loader, val_loader, _ = make_loaders(args, use_aug=False)
@@ -565,7 +565,7 @@ def train_segmentation(args):
     nc     = args.seg_classes
  
     if args.use_wandb:
-        wandb.init(project=args.wandb_project, name=f"task3-unet-nc{nc}",
+        wandb.init(project=args.wandb_project, name=f"task3-unet-nc{nc}", entity=ENTITY_NAME,
                    config=vars(args), reinit=True)
  
     train_loader, val_loader, test_loader = make_loaders(args, use_aug=False)

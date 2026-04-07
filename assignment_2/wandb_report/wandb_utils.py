@@ -12,10 +12,7 @@ import torch.nn.functional as F
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-from matplotlib.patches import Patch
-from PIL import Image
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 import wandb
 
@@ -23,11 +20,6 @@ import wandb
 # ── project imports ───────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(__file__))
 
-from models.classification import VGG11Classifier
-from models.vgg11          import VGG11Encoder
-from models.localization   import VGG11Localizer
-from models.segmentation   import VGG11UNet
-from losses.iou_loss       import IoULoss
 from data.pets_dataset     import OxfordIIITPetDataset, get_train_transforms, get_val_transforms
 from data.stratified_split import get_stratified_split
 
@@ -39,6 +31,7 @@ STD        = np.array([0.229, 0.224, 0.225])
 CKPT_CLF   = os.path.join("checkpoints", "classifier.pth")
 CKPT_LOC   = os.path.join("checkpoints", "localizer.pth")
 CKPT_SEG   = os.path.join("checkpoints", "unet_3.pth")
+ENTITY_NAME = 'da25s003-indian-institute-of-technology-madras'
 
 MASK_COLORS = np.array([[0,200,0],[200,0,0],[0,0,200]], dtype=np.uint8)
 
@@ -228,7 +221,7 @@ def accuracy_loss_comparision_plots(args, all_results, epochs):
         ("dropout_0.5",  0.5),
     ]
 
-    run_summary = wandb.init(project=args.wandb_project,
+    run_summary = wandb.init(project=args.wandb_project, entity=ENTITY_NAME,
                               name="2.2-dropout-comparison", tags=["report","2.2"])
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     colors = ['green', 'orange', 'red']
@@ -299,3 +292,37 @@ def accuracy_loss_comparision_plots(args, all_results, epochs):
         run_summary.log(log)
 
     run_summary.finish()
+
+
+# Task 6 utils
+def make_confusion_map(pred, gt, fg_class=0):
+    # pred, gt: [H, W] numpy or torch arrays with class ids
+    pred = torch.as_tensor(pred)
+    gt   = torch.as_tensor(gt)
+
+    pred_fg = (pred == fg_class)
+    gt_fg   = (gt == fg_class)
+
+    tp = pred_fg & gt_fg
+    fp = pred_fg & (~gt_fg)
+    fn = (~pred_fg) & gt_fg
+    tn = (~pred_fg) & (~gt_fg)
+
+    # RGB map: TP=green, FP=red, FN=blue, TN=black
+    h, w = pred.shape
+    vis = torch.zeros((h, w, 3), dtype=torch.uint8)
+    vis[tp] = torch.tensor([0, 255, 0], dtype=torch.uint8)   # TP
+    vis[fp] = torch.tensor([255, 0, 0], dtype=torch.uint8)   # FP
+    vis[fn] = torch.tensor([0, 0, 255], dtype=torch.uint8)   # FN
+    vis[tn] = torch.tensor([0, 0, 0], dtype=torch.uint8)     # TN
+
+    return vis.numpy()
+
+
+# Task 7 utils
+
+def extract_label_from_filename(path):
+    base = os.path.basename(path)
+    name = os.path.splitext(base)[0]
+    # take text before first underscore
+    return name

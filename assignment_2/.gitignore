@@ -8,3 +8,6 @@ wandb/
 __pycache__/
 demo.py
 *.png
+inspect_dataset.py
+preview_image.py
+viz.py

@@ -97,14 +97,13 @@ def run_inference(args):
 
     # Collect predictions
     all_imgs, all_preds, all_gt_bboxes, all_labels = [], [], [], []
-
     with torch.no_grad():
         for imgs, labels, bboxes_norm, _ in loader:
-            pred_px   = model(imgs.to(device))                       # pixel output
-            pred_norm = torch.clamp(pred_px / IMG_SIZE, 0.0, 1.0)   # [0,1]
+            pred_norm = model(imgs.to(device))            # already [0,1]
+            pred_norm = torch.clamp(pred_norm, 0.0, 1.0)  # optional safety clamp
             all_imgs.append(imgs.cpu())
             all_preds.append(pred_norm.cpu())
-            all_gt_bboxes.append(bboxes_norm.cpu())   # normalised gt (fallback for test)
+            all_gt_bboxes.append(bboxes_norm.cpu())
             all_labels.append(labels.cpu())
 
     all_imgs      = torch.cat(all_imgs)
@@ -173,7 +172,7 @@ if __name__ == "__main__":
     ap.add_argument("--batch_size",  type=int, default=32)
     ap.add_argument("--num_workers", type=int, default=4)
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--save",        default="bbox_results.png") 
+    ap.add_argument("--save",        default="inference/bbox_results.png") 
     ap.add_argument("--device",      default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
     run_inference(args)

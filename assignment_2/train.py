@@ -31,6 +31,7 @@ CKPT_LOC   = os.path.join("checkpoints", "localizer.pth")
 CKPT_SEG   = os.path.join("checkpoints", "unet")
 ENTITY_NAME = 'da25s003-indian-institute-of-technology-madras'
 
+
 def set_seed(seed: int = 42):
     """Fix seed at hardware level for full reproducibility."""
     random.seed(seed)
@@ -71,6 +72,26 @@ def load_backbone_from_classifier(model, clf_path: str, encoder_attr: str = "enc
     missing, unexpected = enc.load_state_dict(remapped, strict=False)
     print(f"  [backbone] loaded {len(remapped)} tensors | "
           f"missing={len(missing)} unexpected={len(unexpected)}")
+
+
+
+def mixup_data(x: torch.Tensor, y: torch.Tensor, alpha: float = 0.4):
+    if alpha <= 0:
+        return x, y, y, 1.0
+ 
+    lam = float(np.random.beta(alpha, alpha))
+    B   = x.size(0)
+    idx = torch.randperm(B, device=x.device)
+ 
+    x_mix = lam * x + (1 - lam) * x[idx]
+    y_a   = y
+    y_b   = y[idx]
+    return x_mix, y_a, y_b, lam
+ 
+ 
+def mixup_criterion(criterion, logits, y_a, y_b, lam):
+    """Compute Mixup loss."""
+    return lam * criterion(logits, y_a) + (1 - lam) * criterion(logits, y_b)
 
 
 def make_loaders(args, use_aug=True):
@@ -176,6 +197,7 @@ def iou_metric(pred_norm: torch.Tensor, tgt_norm: torch.Tensor,
     union = (px2-px1)*(py2-py1) + (tx2-tx1)*(ty2-ty1) - inter + eps
     return (inter / union).mean().item()
 
+
 def dice_loss_fn(logits, targets, num_classes, eps=1e-6):
     """Soft multi-class Dice loss. logits: [B,C,H,W], targets: [B,H,W]."""
     if num_classes == 1:
@@ -190,6 +212,7 @@ def dice_loss_fn(logits, targets, num_classes, eps=1e-6):
         denom  = probs.sum(dims) + onehot.sum(dims)
     dice   = (2 * inter + eps) / (denom + eps)
     return 1.0 - dice.mean()
+
 
 def seg_metrics(pred_mask: torch.Tensor, tgt_mask: torch.Tensor,
                 num_classes: int, eps: float = 1e-6) -> dict:
@@ -276,9 +299,6 @@ def train_classifier(args):
     patience = 0
     early_stop = getattr(args, "clf_patience", 25)
     scaler = torch.amp.GradScaler('cuda')   
-
-    from viz import mixup_criterion, mixup_data
-
     for epoch in range(1, args.clf_epochs + 1):
         model.train()
         t_loss = 0.0
@@ -410,59 +430,62 @@ def train_classifier(args):
 def train_localizer(args):
     print(f"\n{'='*60}\nTASK 2: Localisation\n{'='*60}")
     device = args.device
- 
+
     if args.use_wandb:
         wandb.init(project=args.wandb_project, name="task2-localizer", entity=ENTITY_NAME,
                    config=vars(args), reinit=True)
- 
+
     train_loader, val_loader, _ = make_loaders(args, use_aug=False)
- 
-    model = VGG11Localizer(dropout_p=args.dropout_p,
-                            freeze_backbone=False).to(device)
+
+    model = VGG11Localizer(dropout_p=args.dropout_p, freeze_backbone=False).to(device)
     load_backbone_from_classifier(model, CKPT_CLF, encoder_attr="encoder")
- 
-    mse_fn = nn.MSELoss()
-    iou_fn = IoULoss(reduction="mean")   # custom IoULoss, inputs must be [0,1]
- 
+
+    reg_fn = nn.SmoothL1Loss()
+    iou_fn = IoULoss(reduction="mean")
+
+    use_amp = (device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda") if use_amp else None
+
     stage1_end = getattr(args, "loc_stage1", 10)
     stage2_end = stage1_end + getattr(args, "loc_stage2", 5)
- 
+
     def _freeze(m):
         for p in m.parameters(): p.requires_grad = False
- 
+
     def _unfreeze(m):
         for p in m.parameters(): p.requires_grad = True
- 
+
     def _make_opt_sched(params, lr, n_epochs):
-        opt   = torch.optim.AdamW(list(params), lr=lr, weight_decay=1e-4)
+        opt = torch.optim.AdamW(list(params), lr=lr, weight_decay=1e-4)
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(
             opt, T_max=max(1, n_epochs), eta_min=1e-7)
         return opt, sched
- 
+
     _freeze(model.encoder.enc1)
     _freeze(model.encoder.enc2)
     _freeze(model.encoder.enc3)
- 
+
     optimizer, scheduler = _make_opt_sched(
         filter(lambda p: p.requires_grad, model.parameters()),
-        args.loc_lr, stage1_end)
- 
+        args.loc_lr, stage1_end
+    )
+
     print(f"  Stage 1 (1-{stage1_end}): enc4+enc5+head only")
     print(f"  Stage 2 ({stage1_end+1}-{stage2_end}): +enc3")
     print(f"  Stage 3 ({stage2_end+1}-{args.loc_epochs}): full fine-tune")
- 
+
     best_iou, best_epoch, patience_count = 0.0, 0, 0
     early_stop = getattr(args, "loc_patience", 15)
- 
+
     for epoch in range(1, args.loc_epochs + 1):
- 
+
         if epoch == stage1_end + 1:
             _unfreeze(model.encoder.enc3)
             optimizer, scheduler = _make_opt_sched(
                 filter(lambda p: p.requires_grad, model.parameters()),
                 args.loc_lr * 0.3, stage2_end - stage1_end)
             print(f"  [Epoch {epoch}] Stage 2: enc3 unfrozen")
- 
+
         elif epoch == stage2_end + 1:
             _unfreeze(model.encoder.enc1)
             _unfreeze(model.encoder.enc2)
@@ -470,77 +493,93 @@ def train_localizer(args):
                 filter(lambda p: p.requires_grad, model.parameters()),
                 args.loc_lr * 0.1, args.loc_epochs - stage2_end)
             print(f"  [Epoch {epoch}] Stage 3: full model")
- 
-        # ── Train ────────────────────────────────────────────────────────
+
+        # train
         model.train()
-        t_mse, t_iou_l, t_total, t_iou_m = 0., 0., 0., 0.
- 
+        t_reg, t_iou_l, t_total, t_iou_m = 0., 0., 0., 0.
+
         for imgs, _, bboxes_norm, _ in train_loader:
-            imgs        = imgs.to(device)
-            bboxes_norm = bboxes_norm.to(device)            # [0,1] normalised
-            bboxes_px   = bboxes_norm * IMG_SIZE            # pixel-space targets
- 
-            optimizer.zero_grad()
-            pred_px   = model(imgs)                         # [B,4] pixel output
-            pred_norm = torch.clamp(pred_px / IMG_SIZE, 0.0, 1.0)  # normalise for IoU
- 
-            loss_mse  = mse_fn(pred_px, bboxes_px)         # MSE in pixel space
-            loss_iou  = iou_fn(pred_norm, bboxes_norm)      # IoU in [0,1]
-            loss      = loss_mse / (IMG_SIZE ** 2) + loss_iou  # scale-balanced
- 
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-            optimizer.step()
- 
-            t_mse   += loss_mse.item()
+            imgs = imgs.to(device)
+            bboxes_norm = bboxes_norm.to(device)  # [0,1]
+
+            optimizer.zero_grad(set_to_none=True)
+
+            if use_amp:
+                with torch.amp.autocast("cuda"):
+                    pred_norm = model(imgs)                     # [0,1]
+                    loss_reg  = reg_fn(pred_norm, bboxes_norm)
+                    loss_iou  = iou_fn(pred_norm, bboxes_norm)
+                    loss = loss_reg + loss_iou
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                pred_norm = model(imgs)
+                loss_reg  = reg_fn(pred_norm, bboxes_norm)
+                loss_iou  = iou_fn(pred_norm, bboxes_norm)
+                loss= loss_reg + loss_iou
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+                optimizer.step()
+
+            t_reg   += loss_reg.item()
             t_iou_l += loss_iou.item()
             t_total += loss.item()
             t_iou_m += iou_metric(pred_norm.detach(), bboxes_norm)
- 
+
         n = len(train_loader)
-        t_mse /= n; t_iou_l /= n; t_total /= n; t_iou_m /= n
+        t_reg /= n; t_iou_l /= n; t_total /= n; t_iou_m /= n
         scheduler.step()
- 
-        # ── Val ──────────────────────────────────────────────────────────
+
+        #t Val
         model.eval()
-        v_mse, v_iou_l, v_total, v_iou_m = 0., 0., 0., 0.
- 
+        v_reg, v_iou_l, v_total, v_iou_m = 0., 0., 0., 0.
+
         with torch.no_grad():
             for imgs, _, bboxes_norm, _ in val_loader:
-                imgs        = imgs.to(device)
+                imgs = imgs.to(device)
                 bboxes_norm = bboxes_norm.to(device)
-                bboxes_px   = bboxes_norm * IMG_SIZE
-                pred_px     = model(imgs)
-                pred_norm   = torch.clamp(pred_px / IMG_SIZE, 0.0, 1.0)
- 
-                l_mse    = mse_fn(pred_px, bboxes_px)
-                l_iou    = iou_fn(pred_norm, bboxes_norm)
-                v_mse   += l_mse.item()
+
+                if use_amp:
+                    with torch.amp.autocast("cuda"):
+                        pred_norm = model(imgs)
+                        l_reg = reg_fn(pred_norm, bboxes_norm)
+                        l_iou = iou_fn(pred_norm, bboxes_norm)
+                        l_tot = l_reg + l_iou
+                else:
+                    pred_norm = model(imgs)
+                    l_reg = reg_fn(pred_norm, bboxes_norm)
+                    l_iou = iou_fn(pred_norm, bboxes_norm)
+                    l_tot = l_reg + l_iou
+
+                v_reg   += l_reg.item()
                 v_iou_l += l_iou.item()
-                v_total += (l_mse / IMG_SIZE**2 + l_iou).item()
+                v_total += l_tot.item()
                 v_iou_m += iou_metric(pred_norm, bboxes_norm)
- 
+
         n = len(val_loader)
-        v_mse /= n; v_iou_l /= n; v_total /= n; v_iou_m /= n
- 
+        v_reg /= n; v_iou_l /= n; v_total /= n; v_iou_m /= n
+
         print(f"  Epoch {epoch:3d}/{args.loc_epochs} | "
-              f"train mse_px={t_mse:.1f} iou_l={t_iou_l:.4f} miou={t_iou_m:.4f} | "
-              f"val   mse_px={v_mse:.1f} iou_l={v_iou_l:.4f} miou={v_iou_m:.4f}")
- 
+              f"train reg={t_reg:.4f} iou_l={t_iou_l:.4f} miou={t_iou_m:.4f} | "
+              f"val   reg={v_reg:.4f} iou_l={v_iou_l:.4f} miou={v_iou_m:.4f}")
+
         wandb_log({
             "epoch":                epoch,
             "loc/best_epoch":       epoch if v_iou_m > best_iou else best_epoch,
             "loc/lr":               scheduler.get_last_lr()[0],
-            "loc/train/mse_px":     t_mse,
+            "loc/train/reg_loss":   t_reg,
             "loc/train/iou_loss":   t_iou_l,
             "loc/train/total_loss": t_total,
             "loc/train/mean_iou":   t_iou_m,
-            "loc/val/mse_px":       v_mse,
+            "loc/val/reg_loss":     v_reg,
             "loc/val/iou_loss":     v_iou_l,
             "loc/val/total_loss":   v_total,
             "loc/val/mean_iou":     v_iou_m,
         }, args.use_wandb)
- 
+
         if v_iou_m > best_iou:
             best_iou, best_epoch, patience_count = v_iou_m, epoch, 0
             save_checkpoint(CKPT_LOC, model, epoch, best_iou)
@@ -550,14 +589,15 @@ def train_localizer(args):
                 print(f"  Early stopping at epoch {epoch} "
                       f"(best val mIoU={best_iou:.4f})")
                 break
- 
+
     print(f"\n  [TEST] No bbox annotations in test split.")
     print(f"  Best val mIoU = {best_iou:.4f} (epoch {best_epoch})")
     wandb_log({"loc/val/best_miou": best_iou}, args.use_wandb)
- 
+
     if args.use_wandb:
         wandb.finish()
     return best_iou
+
 
 def train_segmentation(args):
     print(f"\n{'='*60}\nTASK 3: Segmentation  (seg_classes={args.seg_classes})\n{'='*60}")
@@ -610,7 +650,7 @@ def train_segmentation(args):
                 optimizer, T_max=args.seg_epochs - epoch + 1, eta_min=1e-6)
             print(f"  [Epoch {epoch}] encoder unfrozen")
  
-        # ── Train ────────────────────────────────────────────────────────
+        # ─train─
         model.train()
         t_loss = 0.0
         all_pred, all_tgt = [], []
@@ -676,7 +716,7 @@ def train_segmentation(args):
         t_m = seg_metrics(t_pred_all, t_tgt_all, num_classes=metrics_nc)
         scheduler.step()
  
-        # ── Val ──────────────────────────────────────────────────────────
+        #t Val
         model.eval()
         v_loss = 0.0
         all_pred, all_tgt = [], []
@@ -770,7 +810,7 @@ def train_segmentation(args):
                 print(f"  Early stopping at epoch {epoch} (best dice={best_dice:.4f})")
                 break
  
-    # ── Test ─────────────────────────────────────────────────────────────
+    # tTest
     ckpt = torch.load(CKPT_SEG + "_" + str(args.seg_classes)+ ".pth", map_location=device, weights_only=True)
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
@@ -846,6 +886,7 @@ def train_segmentation(args):
         wandb.finish()
     return best_dice
 
+
 def parse_args():
     p = argparse.ArgumentParser(description="DA6401 Assignment-2 Training")
 
@@ -880,6 +921,7 @@ def parse_args():
                    help="Enable Weights & Biases logging")
 
     return p.parse_args()
+
 
 if __name__ == "__main__":
     args        = parse_args()

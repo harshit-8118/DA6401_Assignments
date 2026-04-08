@@ -11,32 +11,36 @@ class RegressionHead(nn.Module):
     """Regression head for bounding box prediction."""
     def __init__(self, dropout_p: float = 0.5):
         super(RegressionHead, self).__init__()
-        kern = 3
+        kern = 4
         self.pool = nn.AdaptiveAvgPool2d((kern, kern))
         self.flatten = nn.Flatten()
         self.fc = nn.Sequential(    
-            nn.Linear(512 * kern * kern, 512, bias=True),
+            nn.Linear(512 * kern * kern, 1024, bias=True),
             nn.ReLU(inplace=True),
             CustomDropout(p=dropout_p),
-            nn.Linear(512, 4, bias=True),
+            nn.Linear(1024, 256, bias=True),
+            nn.ReLU(inplace=True),
+            CustomDropout(p=dropout_p),
+            nn.Linear(256, 4, bias=True),
         )
         self._init_weights()    
  
     def _init_weights(self):
         nn.init.xavier_uniform_(self.fc[0].weight)
         nn.init.constant_(self.fc[0].bias, 0.0)
-        # Last layer: small weights + bias at image center
-        nn.init.xavier_uniform_(self.fc[3].weight, gain=0.1)
-        nn.init.constant_(self.fc[3].bias, IMG_SIZE / 2)
+
+        nn.init.xavier_uniform_(self.fc[3].weight)
+        nn.init.constant_(self.fc[3].bias, 0.0)
+
+        nn.init.xavier_uniform_(self.fc[6].weight, gain=0.1)
+        nn.init.constant_(self.fc[6].bias, 0.0)
 
     def forward(self, f5: torch.Tensor) -> torch.Tensor:
         """Forward pass for regression head.
         Returns:
             Bounding box coordinates [B, 4] in (x_center, y_center, width, height) format.
         """
-        x = self.pool(f5)
-        x = self.flatten(x)
-        return self.fc(x)
+        return torch.sigmoid(self.fc(self.flatten(self.pool(f5))))
 
 
 class VGG11Localizer(nn.Module):

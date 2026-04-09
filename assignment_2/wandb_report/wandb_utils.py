@@ -17,13 +17,13 @@ from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
 import wandb
 
 
-# ── project imports ───────────────────────────────────────────────────────────
+# project imports
 sys.path.insert(0, os.path.dirname(__file__))
 
 from data.pets_dataset     import OxfordIIITPetDataset, get_train_transforms, get_val_transforms
 from data.stratified_split import get_stratified_split
 
-# ── constants ─────────────────────────────────────────────────────────────────
+# constants─
 IMG_SIZE   = 224
 NUM_BREEDS = 37
 MEAN       = np.array([0.485, 0.456, 0.406])
@@ -70,7 +70,6 @@ def make_train_val_loaders(args, batch_size=32):
 
 
 # Task 1 utils
-
 def quick_train_clf(model, train_loader, val_loader, device, epochs, tag, run, task='2.1'):
     """Train classifier for N epochs, log to wandb run, return train/val loss lists."""
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
@@ -213,7 +212,6 @@ def lr_sweep_probe(model, train_loader, device, lr=1e-3, steps=200):
 
 
 # Task 2 utils
-
 def accuracy_loss_comparision_plots(args, all_results, epochs):
     conditions = [
         ("no_dropout",   0.0),
@@ -320,7 +318,6 @@ def make_confusion_map(pred, gt, fg_class=0):
 
 
 # Task 7 utils
-
 def extract_label_from_filename(path):
     base = os.path.basename(path)
     name = os.path.splitext(base)[0]

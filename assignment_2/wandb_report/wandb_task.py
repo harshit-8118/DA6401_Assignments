@@ -1,26 +1,3 @@
-"""
-Usage:
-    python wandb_report_tasks.py --task 2.1 --data_root ./data/oxford-iiit-pet
-    python wandb_report_tasks.py --task 2.2 --data_root ./data/oxford-iiit-pet
-    python wandb_report_tasks.py --task 2.3 --data_root ./data/oxford-iiit-pet
-    python wandb_report_tasks.py --task 2.4 --data_root ./data/oxford-iiit-pet --image_path ./sample.jpg
-    python wandb_report_tasks.py --task 2.5 --data_root ./data/oxford-iiit-pet
-    python wandb_report_tasks.py --task 2.6 --data_root ./data/oxford-iiit-pet
-    python wandb_report_tasks.py --task 2.7 --image_path ./wild1.jpg ./wild2.jpg ./wild3.jpg
-    python wandb_report_tasks.py --task 2.8
-
-REQUIRED FILES BEFORE RUNNING:
-    checkpoints/classifier.pth   — trained VGG11Classifier
-    checkpoints/localizer.pth    — trained VGG11Localizer
-    checkpoints/unet_3.pth       — trained VGG11UNet (nc=3)
-
-REQUIRED CODE CHANGES (in your models/ folder):
-    1. models/vgg11.py     — compact head (enc1..enc5 + small FC head)
-    2. models/localization.py — RegressionHead with NO Sigmoid, bias=112
-    3. losses/iou_loss.py  — IoULoss with reduction={"mean","sum","none"}
-
-"""
-
 import argparse
 import os
 import sys
@@ -40,22 +17,18 @@ from PIL import Image
 from torch.utils.data import DataLoader, Subset
 import wandb
 
-# ── project imports ───────────────────────────────────────────────────────────
+#  project imports
 sys.path.insert(0, os.path.dirname(__file__))
 
 from models.classification import VGG11Classifier
-from models.vgg11          import VGG11Encoder
 from models.localization   import VGG11Localizer
 from models.segmentation   import VGG11UNet
-from losses.iou_loss       import IoULoss
-from data.pets_dataset     import OxfordIIITPetDataset, get_train_transforms, get_val_transforms
-from data.stratified_split import get_stratified_split
+from data.pets_dataset     import get_val_transforms
 
 from wandb_utils import (
     make_val_loader, 
     make_train_val_loaders,
     quick_train_clf, 
-    epoch_to_reach, 
     log_loss_curve, 
     log_combined_curves,
     lr_sweep_probe, 
@@ -67,7 +40,7 @@ from wandb_utils import (
     plot_overlay_seg    
 )
 
-# ── constants ─────────────────────────────────────────────────────────────────
+#  constants ─
 IMG_SIZE   = 224
 NUM_BREEDS = 37
 MEAN       = np.array([0.485, 0.456, 0.406])
@@ -80,7 +53,7 @@ ENTITY_NAME = 'da25s003-indian-institute-of-technology-madras'
 MASK_COLORS = np.array([[0,200,0],[200,0,0],[0,0,200]], dtype=np.uint8)
 
 
-# ── helpers ───────────────────────────────────────────────────────────────────
+#  helpers ─
 def set_seed(seed=42):
     random.seed(seed); np.random.seed(seed)
     torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
@@ -120,10 +93,7 @@ def overlay_mask(img_float, mask_np, alpha=0.5):
     return out.astype(np.float32) / 255.0
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # 2.1 — Regularization Effect of Dropout (BatchNorm activation distributions)
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def task_2_1(args):
     device = get_device()
     set_seed(42)
@@ -137,7 +107,7 @@ def task_2_1(args):
     model_bn  = VGG11Classifier(num_classes=NUM_BREEDS, dropout_p=0.5).to(device)
     model_nobn = VGG11ClassifierNoBn(num_classes=NUM_BREEDS, dropout_p=0.5).to(device)
 
-    # ── Hook to capture 3rd conv layer activations ─────────────────────────
+    #  Hook to capture 3rd conv layer activations ─
     def get_hook(storage):
         def hook(module, inp, out): storage.append(out.detach().cpu())
         return hook
@@ -154,7 +124,7 @@ def task_2_1(args):
         model_bn(imgs_fixed); model_nobn(imgs_fixed)
     h1.remove(); h2.remove()
 
-    # ── Plot distributions ─────────────────────────────────────────────────
+    #  Plot distributions ─
     bn_vals  = acts_bn[0].numpy().ravel()
     nbn_vals = acts_nobn[0].numpy().ravel()
 
@@ -206,7 +176,7 @@ def task_2_1(args):
         })
 
 
-    # ── Train both for 20 epochs and compare convergence ───────────────────
+    #  Train both for 20 epochs and compare convergence ─
     print("Training WITH BN for 20 epochs...")
     t_bn, v_bn, _, _ = quick_train_clf(model_bn, train_loader, val_loader, device, 20, "bn", run)
     print("Training WITHOUT BN for 20 epochs...")
@@ -231,9 +201,7 @@ def task_2_1(args):
     run.finish()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # 2.2 — Internal Dynamics: Dropout p=0, 0.2, 0.5
-# ═══════════════════════════════════════════════════════════════════════════════
 def task_2_2(args):
     """
     Train classifier under 3 dropout conditions for N epochs.
@@ -275,9 +243,7 @@ def task_2_2(args):
     accuracy_loss_comparision_plots(args, all_results, epochs)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # 2.3 — Transfer Learning Showdown (3 strategies on segmentation)
-# ═══════════════════════════════════════════════════════════════════════════════
 import time
 def task_2_3(args):
     device = get_device()
@@ -450,9 +416,7 @@ def task_2_3(args):
     run_strategy("full_fine_tuning",         freeze_none,  "full",    lr_full)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # 2.4 — Feature Map Visualization
-# ═══════════════════════════════════════════════════════════════════════════════
 def task_2_4(args):
     device = get_device()
     run = wandb.init(project=args.wandb_project, name="2.4-feature-maps", entity=ENTITY_NAME,
@@ -548,9 +512,7 @@ def task_2_4(args):
     run.finish()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # 2.5 — Object Detection: Confidence & IoU Table
-# ═══════════════════════════════════════════════════════════════════════════════
 def task_2_5(args):
     device = get_device()
     run = wandb.init(project=args.wandb_project, name="2.5-detection-table", entity=ENTITY_NAME,
@@ -646,9 +608,7 @@ def task_2_5(args):
     run.finish()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # 2.6 — Segmentation: Dice vs Pixel Accuracy
-# ═══════════════════════════════════════════════════════════════════════════════
 def task_2_6(args):
     device = get_device()
     run = wandb.init(project=args.wandb_project, name="2.6-segmentation-eval", entity=ENTITY_NAME,
@@ -760,9 +720,7 @@ def task_2_6(args):
     run.finish()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # 2.7 — Final Pipeline Showcase on Wild Images
-# ═══════════════════════════════════════════════════════════════════════════════
 def task_2_7(args):
     if not args.image_path or len(args.image_path) < 3:
         print("Error: --image_path requires at least 3 image paths"); return
@@ -907,9 +865,7 @@ def task_2_7(args):
     run.finish()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # 2.8 — Meta-Analysis: Combined metric plots
-# ═══════════════════════════════════════════════════════════════════════════════
 def task_2_8(args):
     import os
     device = get_device()
@@ -981,10 +937,7 @@ def task_2_8(args):
     run.finish()
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
 # Entry point
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def parse_args():
     p = argparse.ArgumentParser(description="W&B Report Tasks 2.1-2.8")
     p.add_argument("--task",           type=str, required=True,

@@ -944,16 +944,3 @@ if __name__ == "__main__":
     print("\nDone. Checkpoints saved:")
     for ck in [CKPT_CLF, CKPT_LOC, f"{CKPT_SEG}_{args.seg_classes}.pth"]:
         print(f"  {ck}  {'✓' if os.path.exists(ck) else '(not trained)'}")
-
-
-# Ran command 
-# classification
-# python train.py --use_wandb -b 64 -dp 0.5 --task clf --clf_lr 0.0005 --clf_epochs 70 -> classifier train f1 74 | val f1 68 | test f1 63
-
-
-# localisation
-# python train.py --task loc -b 32 -dp 0.4 --loc_lr 0.001 --loc_epochs 50 --loc_patience 15 --loc_stage1 20 --loc_stage2 10 --use_wandb -> m_iou val 0.64451 and train 0.72391 
-
-# segmentation
-# python train.py --task seg --seg_classes 3 --seg_lr 1e-3 --seg_epochs 30 --seg_patience 10 --use_wandb --device cuda:1 -> mean_dice train 83 val 77 test 79
-# python train.py --task seg --seg_classes 1 --seg_lr 1e-3 --seg_epochs 30 --seg_patience 10 --use_wandb --device cuda:0 -> mean_dice train 93 val 89 test 91

@@ -602,19 +602,19 @@ def task_2_5(args):
             if rows_collected >= 32: break
 
             pred_px   = model(imgs.to(device))
-            pred_norm = torch.clamp(pred_px / IMG_SIZE, 0.0, 1.0).cpu()
+            pred_norm = torch.clamp(pred_px, 0.0, 1.0).cpu()
 
             gt_n   = bboxes_norm[0].numpy()
             pr_n   = pred_norm[0].numpy()
 
-            iou  = iou_single(pr_n, gt_n)
-            conf = float(1.0 - abs(pr_n - gt_n).mean())  # proxy
+            iou  = float(iou_single(pr_n, gt_n))
+            conf = float(1.0 - np.abs(pr_n - gt_n).mean())
 
             img_np = unnorm(imgs[0])
             img_path = draw_bbox_img(img_np, pr_n, gt_n, iou, conf)
 
             note = ""
-            if conf > 0.7 and iou < 0.3:
+            if conf > 0.7 and iou < 0.4:
                 note = "HIGH CONF LOW IOU (failure)"
 
             table.add_data(
@@ -942,16 +942,16 @@ def task_2_8(args):
     })
 
     # ----- Localization -----
-    loc_run = api.run("da25s003-indian-institute-of-technology-madras/DA6402-Assignment-2_v1/70v45q7r")
+    loc_run = api.run("da25s003-indian-institute-of-technology-madras/DA6402-Assignment-2_v1/2ogxbywj")
     loc_keys = [
         "epoch",
-        "loc/val/mse", "loc/val/iou_loss", "loc/val/total_loss", "loc/val/mean_iou",
-        "loc/train/mse", "loc/train/iou_loss", "loc/train/total_loss", "loc/train/mean_iou",
+        "loc/val/reg_loss", "loc/val/iou_loss", "loc/val/total_loss", "loc/val/mean_iou",
+        "loc/train/reg_loss", "loc/train/iou_loss", "loc/train/total_loss", "loc/train/mean_iou",
     ]
     loc_df = loc_run.history(keys=loc_keys, pandas=False)
     ensure_dir("loc_plots")
 
-    loc_total_path, loc_iou_path, loc_miou_path, loc_mse_path = plot_overlay_loc(df=loc_df, out_dir="loc_plots")
+    loc_total_path, loc_iou_path, loc_mse_path, loc_miou_path = plot_overlay_loc(df=loc_df, out_dir="loc_plots")
 
     run.log({
         "2.8/loc_total_loss": wandb.Image(loc_total_path),

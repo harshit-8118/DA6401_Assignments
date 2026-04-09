@@ -408,8 +408,8 @@ def plot_overlay_loc(df, out_dir=".", prefix="loc"):
 
     # MSE
     fig, ax = plt.subplots(figsize=(6,4))
-    ax.plot(x, _series(df, "loc/train/mse"), label="train MSE")
-    ax.plot(x, _series(df, "loc/val/mse"),   label="val MSE")
+    ax.plot(x, _series(df, "loc/train/reg_loss"), label="train MSE")
+    ax.plot(x, _series(df, "loc/val/reg_loss"),   label="val MSE")
     ax.set_title("Localization MSE (Train vs Val)")
     ax.set_xlabel(xlab); ax.set_ylabel("MSE")
     ax.legend(); ax.grid(True)

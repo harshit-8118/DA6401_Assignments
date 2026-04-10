@@ -15,21 +15,21 @@ class RegressionHead(nn.Module):
         self.pool = nn.AdaptiveAvgPool2d((kern, kern))
         self.flatten = nn.Flatten()
         self.fc = nn.Sequential(    
-            nn.Linear(512 * kern * kern, 4096, bias=True),
-            nn.BatchNorm1d(4096),
+            nn.Linear(512 * kern * kern, 2048, bias=True),
+            nn.BatchNorm1d(2048),
             nn.ReLU(inplace=True),
-            CustomDropout(p=0.4),
+            CustomDropout(p=0.3),
 
-            nn.Linear(4096, 1024, bias=True),
+            nn.Linear(2048, 1024, bias=True),
             nn.BatchNorm1d(1024),
             nn.ReLU(inplace=True),
             CustomDropout(p=0.1),
 
-            nn.Linear(1024, 256, bias=True),
-            nn.BatchNorm1d(256),
+            nn.Linear(1024, 512, bias=True),
+            nn.BatchNorm1d(512),
             nn.ReLU(inplace=True),
 
-            nn.Linear(256, 4, bias=True),
+            nn.Linear(512, 4, bias=True),
         )
  
     def forward(self, f5: torch.Tensor) -> torch.Tensor:

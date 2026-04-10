@@ -461,7 +461,7 @@ def train_localizer(args):
     optimizer = torch.optim.AdamW(
                                 filter(lambda p: p.requires_grad, model.parameters()),
                                 lr=args.loc_lr,
-                                weight_decay=1e-3
+                                weight_decay=5e-4
                             )
     scheduler = OneCycleLR(
                     optimizer,

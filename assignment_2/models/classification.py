@@ -15,12 +15,14 @@ class VGG11Classifier(nn.Module):
         self.classifier = VGG11Encoder(in_channels=in_channels, num_classes=num_classes, dropout_p=dropout_p)
         
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_features: bool = False) -> torch.Tensor:
         """Forward pass for classification model.
         Returns:
             Classification logits [B, num_classes].
         """
         # TODO: Implement forward pass.
+        if return_features:
+            return self.classifier(x, return_features)
         return self.classifier(x)
 
 if __name__ == "__main__":

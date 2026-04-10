@@ -11,7 +11,7 @@ from sklearn.metrics import (
     accuracy_score, f1_score, precision_score, recall_score,
 )
 import torch.nn.functional as F
-from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR
+from torch.optim.lr_scheduler import SequentialLR, LinearLR, CosineAnnealingLR, OneCycleLR
 import wandb
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "models"))
@@ -40,7 +40,7 @@ def set_seed(seed: int = 42):
     torch.cuda.manual_seed_all(seed)
     
     torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark     = False
+    torch.backends.cudnn.benchmark = False
     os.environ["PYTHONHASHSEED"] = str(seed)
 
 
@@ -55,6 +55,16 @@ def save_checkpoint(path: str, model: nn.Module, epoch: int, best_metric: float)
         "best_metric": best_metric,
     }, path)
     print(f"  [ckpt] saved {path}  epoch={epoch}  metric={best_metric:.4f}")
+
+
+def save_loc_reg_checkpoint(path: str, model: nn.Module, epoch: int, best_metric: float):
+    torch.save({
+        "regression_head": model.regression_head.state_dict(),
+        "epoch": epoch,
+        "best_metric": best_metric,
+    }, path)
+
+    print(f"  [ckpt] saved (head only) {path}  epoch={epoch}  metric={best_metric:.4f}")
 
 
 def load_backbone_from_classifier(model, clf_path: str, encoder_attr: str = "encoder"):
@@ -72,7 +82,6 @@ def load_backbone_from_classifier(model, clf_path: str, encoder_attr: str = "enc
     missing, unexpected = enc.load_state_dict(remapped, strict=False)
     print(f"  [backbone] loaded {len(remapped)} tensors | "
           f"missing={len(missing)} unexpected={len(unexpected)}")
-
 
 
 def mixup_data(x: torch.Tensor, y: torch.Tensor, alpha: float = 0.4):
@@ -437,7 +446,7 @@ def train_localizer(args):
 
     train_loader, val_loader, _ = make_loaders(args, use_aug=False)
 
-    model = VGG11Localizer(dropout_p=args.dropout_p, freeze_backbone=False).to(device)
+    model = VGG11Localizer(dropout_p=args.dropout_p, freeze_backbone=True).to(device)
     load_backbone_from_classifier(model, CKPT_CLF, encoder_attr="encoder")
 
     reg_fn = nn.SmoothL1Loss()
@@ -446,54 +455,33 @@ def train_localizer(args):
     use_amp = (device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda") if use_amp else None
 
-    stage1_end = getattr(args, "loc_stage1", 10)
-    stage2_end = stage1_end + getattr(args, "loc_stage2", 5)
-
     def _freeze(m):
         for p in m.parameters(): p.requires_grad = False
 
-    def _unfreeze(m):
-        for p in m.parameters(): p.requires_grad = True
-
-    def _make_opt_sched(params, lr, n_epochs):
-        opt = torch.optim.AdamW(list(params), lr=lr, weight_decay=1e-4)
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(
-            opt, T_max=max(1, n_epochs), eta_min=1e-7)
-        return opt, sched
-
+    optimizer = torch.optim.AdamW(
+                                filter(lambda p: p.requires_grad, model.parameters()),
+                                lr=args.loc_lr,
+                                weight_decay=1e-5
+                            )
+    # warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=3)
+    # cosine_scheduler = CosineAnnealingLR(optimizer, T_max=max(1, args.loc_epochs - 3))
+    # scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[3])
+    scheduler = OneCycleLR(
+                    optimizer,
+                    max_lr=args.loc_lr,
+                    epochs=args.loc_epochs,
+                    steps_per_epoch=len(train_loader)
+                )
     _freeze(model.encoder.enc1)
     _freeze(model.encoder.enc2)
     _freeze(model.encoder.enc3)
-
-    optimizer, scheduler = _make_opt_sched(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        args.loc_lr, stage1_end
-    )
-
-    print(f"  Stage 1 (1-{stage1_end}): enc4+enc5+head only")
-    print(f"  Stage 2 ({stage1_end+1}-{stage2_end}): +enc3")
-    print(f"  Stage 3 ({stage2_end+1}-{args.loc_epochs}): full fine-tune")
+    _freeze(model.encoder.enc4)
+    _freeze(model.encoder.enc5)
 
     best_iou, best_epoch, patience_count = 0.0, 0, 0
     early_stop = getattr(args, "loc_patience", 15)
 
     for epoch in range(1, args.loc_epochs + 1):
-
-        if epoch == stage1_end + 1:
-            _unfreeze(model.encoder.enc3)
-            optimizer, scheduler = _make_opt_sched(
-                filter(lambda p: p.requires_grad, model.parameters()),
-                args.loc_lr * 0.3, stage2_end - stage1_end)
-            print(f"  [Epoch {epoch}] Stage 2: enc3 unfrozen")
-
-        elif epoch == stage2_end + 1:
-            _unfreeze(model.encoder.enc1)
-            _unfreeze(model.encoder.enc2)
-            optimizer, scheduler = _make_opt_sched(
-                filter(lambda p: p.requires_grad, model.parameters()),
-                args.loc_lr * 0.1, args.loc_epochs - stage2_end)
-            print(f"  [Epoch {epoch}] Stage 3: full model")
-
         # train
         model.train()
         t_reg, t_iou_l, t_total, t_iou_m = 0., 0., 0., 0.
@@ -509,7 +497,7 @@ def train_localizer(args):
                     pred_norm = model(imgs)                     # [0,1]
                     loss_reg  = reg_fn(pred_norm, bboxes_norm)
                     loss_iou  = iou_fn(pred_norm, bboxes_norm)
-                    loss = loss_reg + loss_iou
+                    loss = loss_reg + 3 * loss_iou
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -582,7 +570,7 @@ def train_localizer(args):
 
         if v_iou_m > best_iou:
             best_iou, best_epoch, patience_count = v_iou_m, epoch, 0
-            save_checkpoint(CKPT_LOC, model, epoch, best_iou)
+            save_loc_reg_checkpoint(CKPT_LOC, model, epoch, best_iou)
         else:
             patience_count += 1
             if patience_count >= early_stop:
@@ -615,17 +603,11 @@ def train_segmentation(args):
     load_backbone_from_classifier(model, CKPT_CLF, encoder_attr="encoder")
     use_amp = (device.type == "cuda")
     scaler = torch.amp.GradScaler("cuda") if use_amp else None
-    if nc == 1:
-        # Binary: foreground vs rest
-        criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([3.0]).to(device))
-    else:
-        # 3-class CE with inverse-frequency weights + soft Dice
-        # Weights: boundary upweighted heavily (~5x) since it's only ~8% of pixels
-        class_weights = torch.tensor([1.0, 0.7, 4.5], device=device)
-        criterion     = nn.CrossEntropyLoss(weight=class_weights)
-        # Dice loss added inside loop for nc==3
+   
+    class_weights = torch.tensor([1.0, 0.7, 4.5], device=device)
+    criterion     = nn.CrossEntropyLoss(weight=class_weights)
  
-    # Freeze encoder for warmup, then progressive unfreeze
+    # Freeze encoder for warmup
     for p in model.encoder.parameters():
         p.requires_grad = False
     optimizer = torch.optim.AdamW(
@@ -634,27 +616,15 @@ def train_segmentation(args):
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.seg_epochs, eta_min=1e-6)
  
-    unfreeze_at = max(1, args.seg_epochs // 3)
     best_dice   = 0.0
     patience    = 0
     early_stop  = getattr(args, "seg_patience", 20)
  
     for epoch in range(1, args.seg_epochs + 1):
- 
-        if epoch == unfreeze_at:
-            for p in model.encoder.parameters():
-                p.requires_grad = True
-            optimizer = torch.optim.AdamW(
-                model.parameters(), lr=args.seg_lr * 0.1, weight_decay=1e-4)
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=args.seg_epochs - epoch + 1, eta_min=1e-6)
-            print(f"  [Epoch {epoch}] encoder unfrozen")
- 
         # ─train─
         model.train()
         t_loss = 0.0
         all_pred, all_tgt = [], []
- 
         for imgs, _, _, masks in train_loader:
             imgs  = imgs.to(device)
             masks = masks.to(device)
@@ -664,20 +634,11 @@ def train_segmentation(args):
             if use_amp:
                 with torch.amp.autocast("cuda"):
                     logits = model(imgs)
-                    if nc == 1:
-                        target = (masks != 1).float()
-                        logits_sq = logits.squeeze(1)
-                        bce_loss = criterion(logits_sq, target)
-                        d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
-                        loss = bce_loss + d_loss
-                        preds = (logits_sq > 0).long()
-                        current_target = target.long().cpu()
-                    else:
-                        ce_loss = criterion(logits, masks)
-                        d_loss = dice_loss_fn(logits, masks, nc)
-                        loss = ce_loss + d_loss
-                        preds = logits.argmax(1)
-                        current_target = masks.cpu()
+                    ce_loss = criterion(logits, masks)
+                    d_loss = dice_loss_fn(logits, masks, nc)
+                    loss = ce_loss + d_loss
+                    preds = logits.argmax(1)
+                    current_target = masks.cpu()
 
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
@@ -686,20 +647,11 @@ def train_segmentation(args):
                 scaler.update()
             else:
                 logits = model(imgs)
-                if nc == 1:
-                    target = (masks != 1).float()
-                    logits_sq = logits.squeeze(1)
-                    bce_loss = criterion(logits_sq, target)
-                    d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
-                    loss = bce_loss + d_loss
-                    preds = (logits_sq > 0).long()
-                    current_target = target.long().cpu()
-                else:
-                    ce_loss = criterion(logits, masks)
-                    d_loss = dice_loss_fn(logits, masks, nc)
-                    loss = ce_loss + d_loss
-                    preds = logits.argmax(1)
-                    current_target = masks.cpu()
+                ce_loss = criterion(logits, masks)
+                d_loss = dice_loss_fn(logits, masks, nc)
+                loss = ce_loss + d_loss
+                preds = logits.argmax(1)
+                current_target = masks.cpu()
 
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -712,8 +664,7 @@ def train_segmentation(args):
         t_loss    /= len(train_loader)
         t_pred_all = torch.cat(all_pred)
         t_tgt_all  = torch.cat(all_tgt)
-        metrics_nc = 2 if nc == 1 else nc
-        t_m = seg_metrics(t_pred_all, t_tgt_all, num_classes=metrics_nc)
+        t_m = seg_metrics(t_pred_all, t_tgt_all, num_classes=nc)
         scheduler.step()
  
         #t Val
@@ -728,36 +679,18 @@ def train_segmentation(args):
                 if use_amp:
                     with torch.amp.autocast("cuda"):
                         logits = model(imgs)
-                        if nc == 1:
-                            target = (masks != 1).float()
-                            logits_sq = logits.squeeze(1)
-                            bce_loss = criterion(logits_sq, target)
-                            d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
-                            loss = bce_loss + d_loss
-                            preds = (logits_sq > 0).long()
-                            current_target = target.long().cpu()
-                        else:
-                            ce_loss = criterion(logits, masks)
-                            d_loss = dice_loss_fn(logits, masks, nc)
-                            loss = ce_loss + d_loss
-                            preds = logits.argmax(1)
-                            current_target = masks.cpu()
-                else:
-                    logits = model(imgs)
-                    if nc == 1:
-                        target = (masks != 1).float()
-                        logits_sq = logits.squeeze(1)
-                        bce_loss = criterion(logits_sq, target)
-                        d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
-                        loss = bce_loss + d_loss
-                        preds = (logits_sq > 0).long()
-                        current_target = target.long().cpu()
-                    else:
                         ce_loss = criterion(logits, masks)
                         d_loss = dice_loss_fn(logits, masks, nc)
                         loss = ce_loss + d_loss
                         preds = logits.argmax(1)
                         current_target = masks.cpu()
+                else:
+                    logits = model(imgs)
+                    ce_loss = criterion(logits, masks)
+                    d_loss = dice_loss_fn(logits, masks, nc)
+                    loss = ce_loss + d_loss
+                    preds = logits.argmax(1)
+                    current_target = masks.cpu()
 
                 v_loss += loss.item()
                 all_pred.append(preds.cpu())
@@ -766,7 +699,7 @@ def train_segmentation(args):
         v_loss    /= len(val_loader)
         v_pred_all = torch.cat(all_pred)
         v_tgt_all  = torch.cat(all_tgt)
-        v_m        = seg_metrics(v_pred_all, v_tgt_all, num_classes=metrics_nc)
+        v_m        = seg_metrics(v_pred_all, v_tgt_all, num_classes=nc)
 
  
         print(f"  Epoch {epoch:3d}/{args.seg_epochs} | "
@@ -824,36 +757,18 @@ def train_segmentation(args):
             if use_amp:
                 with torch.amp.autocast("cuda"):
                     logits = model(imgs)
-                    if nc == 1:
-                        target = (masks != 1).float()
-                        logits_sq = logits.squeeze(1)
-                        bce_loss = criterion(logits_sq, target)
-                        d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
-                        loss = bce_loss + d_loss
-                        preds = (logits_sq > 0).long()
-                        current_target = target.long().cpu()
-                    else:
-                        ce_loss = criterion(logits, masks)
-                        d_loss = dice_loss_fn(logits, masks, nc)
-                        loss = ce_loss + d_loss
-                        preds = logits.argmax(1)
-                        current_target = masks.cpu()
-            else:
-                logits = model(imgs)
-                if nc == 1:
-                    target = (masks != 1).float()
-                    logits_sq = logits.squeeze(1)
-                    bce_loss = criterion(logits_sq, target)
-                    d_loss = dice_loss_fn(torch.sigmoid(logits_sq), target, num_classes=1)
-                    loss = bce_loss + d_loss
-                    preds = (logits_sq > 0).long()
-                    current_target = target.long().cpu()
-                else:
                     ce_loss = criterion(logits, masks)
                     d_loss = dice_loss_fn(logits, masks, nc)
                     loss = ce_loss + d_loss
                     preds = logits.argmax(1)
                     current_target = masks.cpu()
+            else:
+                logits = model(imgs)
+                ce_loss = criterion(logits, masks)
+                d_loss = dice_loss_fn(logits, masks, nc)
+                loss = ce_loss + d_loss
+                preds = logits.argmax(1)
+                current_target = masks.cpu()
 
             te_loss += loss.item()
             all_pred.append(preds.cpu())
@@ -862,9 +777,7 @@ def train_segmentation(args):
     te_loss /= len(test_loader)
     te_pred  = torch.cat(all_pred)
     te_tgt   = torch.cat(all_tgt)
-    metrics_nc = 2 if nc == 1 else nc
-    te_m     = seg_metrics(te_pred, te_tgt, metrics_nc)
-
+    te_m     = seg_metrics(te_pred, te_tgt, nc)
  
     print(f"  [TEST] loss={te_loss:.4f} dice={te_m['mean_dice']:.4f} "
           f"px_acc={te_m['px_accuracy']:.4f} f1_macro={te_m['f1_macro']:.4f}")
@@ -906,10 +819,6 @@ def parse_args():
     p.add_argument("--loc_lr",        type=float, default=1e-3)
     p.add_argument("--loc_epochs",    type=int,   default=30)
     p.add_argument("--loc_patience", type=int, default=15)
-    p.add_argument("--loc_stage1",   type=int, default=10,
-                   help="epochs to train enc4/enc5/head only")
-    p.add_argument("--loc_stage2",   type=int, default=5,
-                   help="epochs to train enc3+ after stage1")
 
     p.add_argument("--seg_lr",        type=float, default=1e-3)
     p.add_argument("--seg_epochs",    type=int,   default=30)

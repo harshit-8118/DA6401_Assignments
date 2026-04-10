@@ -43,7 +43,7 @@ class MultiTaskPerceptionModel(nn.Module):
         self.image_size = 224
         _IDS = {
             "classifier": "1UbIKWiy7j9M9FgV4MhG_KgePEJNO7B3n",
-            "localizer":  "1K_Jy5WR4XxR2PF-idCY3QjHcPR1qqz41",
+            "localizer":  "1CSOBMojczbiXYHcZP5Of3p3L5Dy2LYOb",
             "unet3":      "1QCukqGob1aKBS5qPiaCuYXPmgaHJxUza",
         }
         _maybe_download(classifier_path, _IDS["classifier"])

@@ -11,33 +11,27 @@ class RegressionHead(nn.Module):
     """Regression head for bounding box prediction."""
     def __init__(self, dropout_p: float = 0.5):
         super(RegressionHead, self).__init__()
-        kern = 3
+        kern = 7
         self.pool = nn.AdaptiveAvgPool2d((kern, kern))
         self.flatten = nn.Flatten()
         self.fc = nn.Sequential(    
-            nn.Linear(512 * kern * kern, 512, bias=True),
-            nn.BatchNorm1d(512),
+            nn.Linear(512 * kern * kern, 4096, bias=True),
+            nn.BatchNorm1d(4096),
             nn.ReLU(inplace=True),
-            CustomDropout(p=dropout_p),
+            CustomDropout(p=0.4),
 
-            nn.Linear(512, 128, bias=True),
-            nn.BatchNorm1d(128),
+            nn.Linear(4096, 1024, bias=True),
+            nn.BatchNorm1d(1024),
             nn.ReLU(inplace=True),
-            CustomDropout(p=dropout_p),
-            nn.Linear(128, 4, bias=True),
+            CustomDropout(p=0.1),
+
+            nn.Linear(1024, 256, bias=True),
+            nn.BatchNorm1d(256),
+            nn.ReLU(inplace=True),
+
+            nn.Linear(256, 4, bias=True),
         )
-        self._init_weights()    
  
-    def _init_weights(self):
-        nn.init.xavier_uniform_(self.fc[0].weight)
-        nn.init.constant_(self.fc[0].bias, 0.0)
-
-        nn.init.xavier_uniform_(self.fc[4].weight)
-        nn.init.constant_(self.fc[4].bias, 0.0)
-
-        nn.init.xavier_uniform_(self.fc[8].weight, gain=0.1)
-        nn.init.constant_(self.fc[8].bias, 0.0)
-
     def forward(self, f5: torch.Tensor) -> torch.Tensor:
         """Forward pass for regression head.
         Returns:

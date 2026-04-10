@@ -461,11 +461,8 @@ def train_localizer(args):
     optimizer = torch.optim.AdamW(
                                 filter(lambda p: p.requires_grad, model.parameters()),
                                 lr=args.loc_lr,
-                                weight_decay=1e-5
+                                weight_decay=1e-3
                             )
-    # warmup_scheduler = LinearLR(optimizer, start_factor=0.1, total_iters=3)
-    # cosine_scheduler = CosineAnnealingLR(optimizer, T_max=max(1, args.loc_epochs - 3))
-    # scheduler = SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[3])
     scheduler = OneCycleLR(
                     optimizer,
                     max_lr=args.loc_lr,
@@ -497,7 +494,7 @@ def train_localizer(args):
                     pred_norm = model(imgs)                     # [0,1]
                     loss_reg  = reg_fn(pred_norm, bboxes_norm)
                     loss_iou  = iou_fn(pred_norm, bboxes_norm)
-                    loss = loss_reg + 3 * loss_iou
+                    loss = loss_reg + 2 * loss_iou
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -507,7 +504,7 @@ def train_localizer(args):
                 pred_norm = model(imgs)
                 loss_reg  = reg_fn(pred_norm, bboxes_norm)
                 loss_iou  = iou_fn(pred_norm, bboxes_norm)
-                loss= loss_reg + loss_iou
+                loss= loss_reg + 2 * loss_iou
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
                 optimizer.step()
@@ -535,12 +532,12 @@ def train_localizer(args):
                         pred_norm = model(imgs)
                         l_reg = reg_fn(pred_norm, bboxes_norm)
                         l_iou = iou_fn(pred_norm, bboxes_norm)
-                        l_tot = l_reg + l_iou
+                        l_tot = l_reg + 2 * l_iou
                 else:
                     pred_norm = model(imgs)
                     l_reg = reg_fn(pred_norm, bboxes_norm)
                     l_iou = iou_fn(pred_norm, bboxes_norm)
-                    l_tot = l_reg + l_iou
+                    l_tot = l_reg + 2 * l_iou
 
                 v_reg   += l_reg.item()
                 v_iou_l += l_iou.item()
@@ -825,7 +822,7 @@ def parse_args():
     p.add_argument("--seg_classes",   type=int,   default=3, choices=[1, 3],
                    help="1=binary fg/rest, 3=full trimap {fg,bg,boundary}")
     p.add_argument("--seg_patience", type=int, default=20)
-    p.add_argument("--wandb_project", type=str,   default="DA6402-Assignment-2_v1")
+    p.add_argument("--wandb_project", type=str,   default="DA6401-Assignment-2_v1")
     p.add_argument("--use_wandb",     action="store_true",
                    help="Enable Weights & Biases logging")
 

@@ -42,7 +42,10 @@ class LabelSmoothingLoss(nn.Module):
 
     def __init__(self, vocab_size: int, pad_idx: int, smoothing: float = 0.1) -> None:
         super().__init__()
-        raise NotImplementedError
+        self.vocab_size = vocab_size
+        self.pad_idx = pad_idx
+        self.smoothing = smoothing
+        self.confidence = 1.0 - smoothing
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
@@ -53,8 +56,16 @@ class LabelSmoothingLoss(nn.Module):
         Returns:
             Scalar loss value.
         """
-        # TODO: Task 3.1
-        raise NotImplementedError
+        log_probs = torch.log_softmax(logits, dim=-1)
+        with torch.no_grad():
+            true_dist = torch.full_like(log_probs, self.smoothing / (self.vocab_size - 1))
+            true_dist.scatter_(1, target.unsqueeze(1), self.confidence)
+            true_dist[:, self.pad_idx] = 0
+            pad_mask = target == self.pad_idx
+            true_dist[pad_mask] = 0
+        loss = -(true_dist * log_probs).sum(dim=1)
+        denom = (~(target == self.pad_idx)).sum().clamp_min(1)
+        return loss.sum() / denom
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -88,7 +99,26 @@ def run_epoch(
         avg_loss : Average loss over the epoch (float).
 
     """
-    raise NotImplementedError
+    model.train() if is_train else model.eval()
+    total_loss, total_batches = 0.0, 0
+    for src, tgt in data_iter:
+        src, tgt = src.to(device), tgt.to(device)
+        tgt_in, tgt_out = tgt[:, :-1], tgt[:, 1:]
+        src_mask = make_src_mask(src)
+        tgt_mask = make_tgt_mask(tgt_in)
+        if is_train and optimizer is not None:
+            optimizer.zero_grad(set_to_none=True)
+        with torch.set_grad_enabled(is_train):
+            logits = model(src, tgt_in, src_mask, tgt_mask)
+            loss = loss_fn(logits.reshape(-1, logits.size(-1)), tgt_out.reshape(-1))
+            if is_train and optimizer is not None:
+                loss.backward()
+                optimizer.step()
+                if scheduler is not None:
+                    scheduler.step()
+        total_loss += loss.item()
+        total_batches += 1
+    return total_loss / max(total_batches, 1)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -122,8 +152,16 @@ def greedy_decode(
              or when max_len is reached.
 
     """
-    # TODO: Task 3.3 — implement token-by-token greedy decoding
-    raise NotImplementedError
+    memory = model.encode(src.to(device), src_mask.to(device))
+    ys = torch.ones(1, 1, dtype=torch.long, device=device) * start_symbol
+    for _ in range(max_len - 1):
+        tgt_mask = make_tgt_mask(ys)
+        out = model.decode(memory, src_mask.to(device), ys, tgt_mask)
+        next_word = torch.argmax(out[:, -1, :], dim=-1).item()
+        ys = torch.cat([ys, torch.tensor([[next_word]], dtype=torch.long, device=device)], dim=1)
+        if next_word == end_symbol:
+            break
+    return ys
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -154,8 +192,37 @@ def evaluate_bleu(
         bleu_score : Corpus-level BLEU (float, range 0–100).
 
     """
-    # TODO: Task 3 — loop test set, decode, compute and return BLEU
-    raise NotImplementedError
+    try:
+        from nltk.translate.bleu_score import corpus_bleu
+    except Exception:
+        return 0.0
+
+    def lookup_token(idx: int) -> str:
+        if hasattr(tgt_vocab, "itos"):
+            return tgt_vocab.itos[idx]
+        if hasattr(tgt_vocab, "lookup_token"):
+            return tgt_vocab.lookup_token(idx)
+        return str(idx)
+
+    stoi = getattr(tgt_vocab, "stoi", {})
+    sos = stoi.get("<sos>", 2)
+    eos = stoi.get("<eos>", 3)
+    pad = stoi.get("<pad>", 1)
+
+    references, hypotheses = [], []
+    model.eval()
+    with torch.no_grad():
+        for src_batch, tgt_batch in test_dataloader:
+            for i in range(src_batch.size(0)):
+                src = src_batch[i:i+1].to(device)
+                tgt = tgt_batch[i].tolist()
+                src_mask = make_src_mask(src)
+                pred = greedy_decode(model, src, src_mask, max_len, sos, eos, device=device).squeeze(0).tolist()
+                pred_tokens = [lookup_token(x) for x in pred if x not in (sos, eos, pad)]
+                ref_tokens = [lookup_token(x) for x in tgt if x not in (sos, eos, pad)]
+                hypotheses.append(pred_tokens)
+                references.append([ref_tokens])
+    return float(corpus_bleu(references, hypotheses) * 100.0) if hypotheses else 0.0
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -192,8 +259,25 @@ def save_checkpoint(
          'd_model': ..., 'N': ..., 'num_heads': ...,
          'd_ff': ..., 'dropout': ...}
     """
-    # TODO: implement using torch.save({...}, path)
-    raise NotImplementedError
+    model_config = {
+        "src_vocab_size": model.src_vocab_size,
+        "tgt_vocab_size": model.tgt_vocab_size,
+        "d_model": model.d_model,
+        "N": model.N,
+        "num_heads": model.num_heads,
+        "d_ff": model.d_ff,
+        "dropout": model.dropout_p,
+    }
+    torch.save(
+        {
+            "epoch": epoch,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
+            "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+            "model_config": model_config,
+        },
+        path,
+    )
 
 
 def load_checkpoint(
@@ -215,8 +299,13 @@ def load_checkpoint(
         epoch : The epoch at which the checkpoint was saved (int).
 
     """
-    # TODO: implement restore logic
-    raise NotImplementedError
+    checkpoint = torch.load(path, map_location="cpu")
+    model.load_state_dict(checkpoint["model_state_dict"])
+    if optimizer is not None and checkpoint.get("optimizer_state_dict") is not None:
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    if scheduler is not None and checkpoint.get("scheduler_state_dict") is not None:
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+    return int(checkpoint.get("epoch", 0))
 
 
 # ══════════════════════════════════════════════════════════════════════

@@ -261,7 +261,7 @@ class Transformer(nn.Module):
 
     def _load_or_build_vocabs(self):
         vocab_path = os.getenv("A3_VOCAB_PATH", "vocab.json")
-        vocab_drive_id = os.getenv("A3_VOCAB_DRIVE_ID")
+        vocab_drive_id = os.getenv("A3_VOCAB_DRIVE_ID", "1ysSSFaEk0Kh1YaC_blO_CRE78WTIV-Qn")
         if os.path.exists(vocab_path):
             return self._load_vocab_file(vocab_path)
 
@@ -321,7 +321,7 @@ class Transformer(nn.Module):
             return
         if os.path.exists(self.checkpoint_path):
             return
-        ckpt_drive_id = os.getenv("A3_CKPT_DRIVE_ID")
+        ckpt_drive_id = os.getenv("A3_CKPT_DRIVE_ID", "1XkE-kyCdpeA547o1G7F2N4QTahoK_IYs")
         if not ckpt_drive_id:
             return
         try:

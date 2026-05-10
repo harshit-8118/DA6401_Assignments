@@ -2,6 +2,6 @@ archived/
 load_dataset.py
 venv/
 template/
-*.pt
+*.pt*
 *__pycache__
 wandb/

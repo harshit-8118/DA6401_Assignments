@@ -265,8 +265,9 @@ def load_checkpoint(
     """
     Restore model and optionally optimizer/scheduler state from disk.
     """
-    checkpoint = torch.load(path, map_location="cpu")
+    checkpoint = torch.load(path, weights_only=True, map_location="cpu")
     model.load_state_dict(checkpoint["model_state_dict"])
+
 
     if optimizer is not None and checkpoint.get("optimizer_state_dict") is not None:
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -321,7 +322,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vocab-save-path", type=str, default="vocab.json")
     parser.add_argument("--resume-from", type=str, default=None)
     parser.add_argument("--save-every", type=int, default=1)
-    parser.add_argument("--early-stop-patience", type=int, default=0)
+    parser.add_argument("--early-stop-patience", type=int, default=15)
     parser.add_argument("--eval-only", action="store_true")
     parser.add_argument("--bleu-max-len", type=int, default=100)
 

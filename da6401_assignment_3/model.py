@@ -1,7 +1,6 @@
 import math
 import copy
 import os
-import gdown
 from typing import Optional, Tuple
 
 import torch
@@ -206,7 +205,8 @@ class Transformer(nn.Module):
         self.generator = nn.Linear(d_model, tgt_vocab_size)
 
         if checkpoint_path is not None:
-            gdown.download(id="<.pth drive id>", output=checkpoint_path, quiet=False)
+            if not os.path.exists(checkpoint_path):
+                raise FileNotFoundError(f"checkpoint_path does not exist: {checkpoint_path}")
             ckpt = torch.load(checkpoint_path, map_location="cpu")
             self.load_state_dict(ckpt.get("model_state_dict", ckpt), strict=False)
 
@@ -224,4 +224,7 @@ class Transformer(nn.Module):
         return self.decode(memory, src_mask, tgt, tgt_mask)
 
     def infer(self, src_sentence: str) -> str:
-        raise NotImplementedError
+        raise RuntimeError(
+            "infer() requires an external tokenizer/vocabulary pipeline. "
+            "Use train.py greedy_decode/evaluate utilities or attach your own preprocessing."
+        )

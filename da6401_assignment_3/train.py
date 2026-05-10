@@ -63,7 +63,7 @@ def run_epoch(
     scheduler=None,
     epoch_num: int = 0,
     is_train: bool = True,
-    device: str = "cpu",
+    device: str = "cuda",
 ) -> float:
     """
     Run one epoch of training or evaluation.
@@ -313,7 +313,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-val-samples", type=int, default=None)
     parser.add_argument("--max-test-samples", type=int, default=None)
 
-    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--device", type=str, default="cuda", choices=["cpu", "cuda"])
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--checkpoint-path", type=str, default="checkpoint.pt")
@@ -323,7 +323,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bleu-max-len", type=int, default=100)
 
     parser.add_argument("--use-wandb", action="store_true")
-    parser.add_argument("--wandb-project", type=str, default="da6401-a3")
+    parser.add_argument("--wandb-project", type=str, default="DA6401-Assignment_3")
+    parser.add_argument("--wandb-entity", type=str, default="da25s003-indian-institute-of-technology-madras")
     parser.add_argument("--wandb-run-name", type=str, default=None)
 
     return parser.parse_args()
@@ -332,8 +333,6 @@ def parse_args() -> argparse.Namespace:
 def _resolve_device(name: str) -> str:
     if name == "cpu":
         return "cpu"
-    if name == "cuda":
-        return "cuda" if torch.cuda.is_available() else "cpu"
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -403,7 +402,7 @@ def run_training_experiment() -> None:
         try:
             import wandb
 
-            wandb_run = wandb.init(project=args.wandb_project, name=args.wandb_run_name, config=vars(args))
+            wandb_run = wandb.init(project=args.wandb_project, entity=args.wandb_entity, name=args.wandb_run_name, config=vars(args))
         except Exception as exc:
             print(f"[warn] W&B disabled (init failed): {exc}")
             wandb_run = None

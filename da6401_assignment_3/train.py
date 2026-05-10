@@ -375,6 +375,7 @@ def run_training_experiment() -> None:
         num_heads=args.num_heads,
         d_ff=args.d_ff,
         dropout=args.dropout,
+        checkpoint_path=None,
     ).to(device)
     model.eos_idx = tgt_vocab.stoi["<eos>"]
 

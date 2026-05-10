@@ -5,3 +5,4 @@ template/
 *.pt*
 *__pycache__
 wandb/
+*.zip

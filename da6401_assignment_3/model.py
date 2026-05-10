@@ -321,7 +321,7 @@ class Transformer(nn.Module):
             return
         if os.path.exists(self.checkpoint_path):
             return
-        ckpt_drive_id = os.getenv("A3_CKPT_DRIVE_ID", "1XkE-kyCdpeA547o1G7F2N4QTahoK_IYs")
+        ckpt_drive_id = os.getenv("A3_CKPT_DRIVE_ID", "1EjAiHVs1JzynUQ5eciAamwsgb5rWZyri") # checkpoint.pt
         if not ckpt_drive_id:
             return
         try:
@@ -334,7 +334,7 @@ class Transformer(nn.Module):
     def _load_weights_from_checkpoint(self) -> None:
         if self.checkpoint_path is None or not os.path.exists(self.checkpoint_path):
             return
-        ckpt = torch.load(self.checkpoint_path, map_location="cpu")
+        ckpt = torch.load(self.checkpoint_path, weights_only=True, map_location="cpu")
         loaded_state = ckpt.get("model_state_dict", ckpt)
         current_state = self.state_dict()
         compatible_state = {}
@@ -372,18 +372,67 @@ class Transformer(nn.Module):
 
         with torch.no_grad():
             memory = self.encode(src, src_mask)
-            ys = torch.full((1, 1), self.sos_idx, dtype=torch.long, device=device)
-            max_len = int(os.getenv("A3_INFER_MAX_LEN", "100"))
+            src_len = src.size(1)
+            max_len = min(int(os.getenv("A3_INFER_MAX_LEN", "120")), 2 * src_len + 10)
+            beam_size = max(1, int(os.getenv("A3_BEAM_SIZE", "4")))
+            alpha = float(os.getenv("A3_BEAM_ALPHA", "0.6"))
+            min_len = max(1, int(os.getenv("A3_INFER_MIN_LEN", "2")))
 
-            for _ in range(max_len - 1):
-                tgt_mask = make_tgt_mask(ys, pad_idx=self.pad_idx)
-                out = self.decode(memory, src_mask, ys, tgt_mask)
-                next_word = torch.argmax(out[:, -1, :], dim=-1).item()
-                ys = torch.cat([ys, torch.tensor([[next_word]], dtype=torch.long, device=device)], dim=1)
-                if next_word == self.eos_idx:
-                    break
+            if beam_size == 1:
+                ys = torch.full((1, 1), self.sos_idx, dtype=torch.long, device=device)
+                for step in range(max_len - 1):
+                    tgt_mask = make_tgt_mask(ys, pad_idx=self.pad_idx)
+                    out = self.decode(memory, src_mask, ys, tgt_mask)
+                    logits = out[:, -1, :]
+                    if step + 1 < min_len:
+                        logits[:, self.eos_idx] = -1e9
+                    next_word = torch.argmax(logits, dim=-1).item()
+                    ys = torch.cat([ys, torch.tensor([[next_word]], dtype=torch.long, device=device)], dim=1)
+                    if next_word == self.eos_idx:
+                        break
+                pred_ids = ys.squeeze(0).tolist()
+            else:
+                beams = [([self.sos_idx], 0.0, False)]
+                finished = []
 
-        pred_ids = ys.squeeze(0).tolist()
+                def length_penalty(length):
+                    return ((5.0 + float(length)) / 6.0) ** alpha
+
+                for step in range(max_len - 1):
+                    candidates = []
+                    for tokens, score, done in beams:
+                        if done:
+                            candidates.append((tokens, score, True))
+                            continue
+                        ys = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
+                        tgt_mask = make_tgt_mask(ys, pad_idx=self.pad_idx)
+                        out = self.decode(memory, src_mask, ys, tgt_mask)
+                        log_probs = torch.log_softmax(out[:, -1, :], dim=-1).squeeze(0)
+                        if step + 1 < min_len:
+                            log_probs[self.eos_idx] = -1e9
+                        topk_log_probs, topk_ids = torch.topk(log_probs, k=beam_size)
+
+                        for lp, tid in zip(topk_log_probs.tolist(), topk_ids.tolist()):
+                            new_tokens = tokens + [int(tid)]
+                            new_score = score + float(lp)
+                            done_now = int(tid) == self.eos_idx
+                            candidates.append((new_tokens, new_score, done_now))
+
+                    candidates.sort(
+                        key=lambda x: x[1] / length_penalty(len(x[0])),
+                        reverse=True,
+                    )
+                    beams = candidates[:beam_size]
+                    for b in beams:
+                        if b[2]:
+                            finished.append(b)
+                    if len(finished) >= beam_size:
+                        break
+
+                final_pool = finished if finished else beams
+                best = max(final_pool, key=lambda x: x[1] / (((5.0 + len(x[0])) / 6.0) ** alpha))
+                pred_ids = best[0]
+
         pred_tokens = []
         for idx in pred_ids:
             if idx in (self.sos_idx, self.pad_idx):

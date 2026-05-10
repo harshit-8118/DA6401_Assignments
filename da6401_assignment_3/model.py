@@ -1,6 +1,9 @@
 import math
 import copy
 import os
+import json
+import re
+from collections import Counter
 from typing import Optional, Tuple
 
 import torch
@@ -174,20 +177,31 @@ class Decoder(nn.Module):
 
 
 class Transformer(nn.Module):
+    _shared_tokenizers = None
+    _shared_vocabs = None
+
     def __init__(
         self,
-        src_vocab_size: int,
-        tgt_vocab_size: int,
+        src_vocab_size: Optional[int] = None,
+        tgt_vocab_size: Optional[int] = None,
         d_model: int = 512,
         N: int = 6,
         num_heads: int = 8,
         d_ff: int = 2048,
         dropout: float = 0.1,
-        checkpoint_path: str = None,
+        checkpoint_path: str = "checkpoint.pt",
     ) -> None:
         super().__init__()
-        self.src_vocab_size = src_vocab_size
-        self.tgt_vocab_size = tgt_vocab_size
+        self.checkpoint_path = checkpoint_path
+        self._init_nlp_resources()
+
+        if src_vocab_size is None:
+            src_vocab_size = len(self.src_vocab)
+        if tgt_vocab_size is None:
+            tgt_vocab_size = len(self.tgt_vocab)
+
+        self.src_vocab_size = int(src_vocab_size)
+        self.tgt_vocab_size = int(tgt_vocab_size)
         self.d_model = d_model
         self.N = N
         self.num_heads = num_heads
@@ -204,11 +218,131 @@ class Transformer(nn.Module):
         self.decoder = Decoder(dec_layer, N)
         self.generator = nn.Linear(d_model, tgt_vocab_size)
 
-        if checkpoint_path is not None:
-            if not os.path.exists(checkpoint_path):
-                raise FileNotFoundError(f"checkpoint_path does not exist: {checkpoint_path}")
-            ckpt = torch.load(checkpoint_path, map_location="cpu")
-            self.load_state_dict(ckpt.get("model_state_dict", ckpt), strict=False)
+        self.pad_idx = self.src_vocab.get("<pad>", 1)
+        self.sos_idx = self.tgt_vocab.get("<sos>", 2)
+        self.eos_idx = self.tgt_vocab.get("<eos>", 3)
+
+        self._maybe_download_artifacts()
+        self._load_weights_from_checkpoint()
+
+    def _init_nlp_resources(self) -> None:
+        if Transformer._shared_tokenizers is None:
+            import spacy
+
+            Transformer._shared_tokenizers = {
+                "de": spacy.blank("de").tokenizer,
+                "en": spacy.blank("en").tokenizer,
+            }
+        self.src_tokenizer = Transformer._shared_tokenizers["de"]
+        self.tgt_tokenizer = Transformer._shared_tokenizers["en"]
+
+        if Transformer._shared_vocabs is None:
+            src_vocab, tgt_vocab = self._load_or_build_vocabs()
+            Transformer._shared_vocabs = {
+                "src_vocab": src_vocab,
+                "tgt_vocab": tgt_vocab,
+                "src_itos": self._invert_vocab(src_vocab),
+                "tgt_itos": self._invert_vocab(tgt_vocab),
+            }
+
+        shared = Transformer._shared_vocabs
+        self.src_vocab = shared["src_vocab"]
+        self.tgt_vocab = shared["tgt_vocab"]
+        self.src_itos = shared["src_itos"]
+        self.tgt_itos = shared["tgt_itos"]
+
+    def _invert_vocab(self, stoi):
+        size = max(stoi.values()) + 1
+        itos = ["<unk>"] * size
+        for token, idx in stoi.items():
+            if 0 <= idx < size:
+                itos[idx] = token
+        return itos
+
+    def _load_or_build_vocabs(self):
+        vocab_path = os.getenv("A3_VOCAB_PATH", "vocab.json")
+        vocab_drive_id = os.getenv("A3_VOCAB_DRIVE_ID")
+        if os.path.exists(vocab_path):
+            return self._load_vocab_file(vocab_path)
+
+        if vocab_drive_id:
+            try:
+                import gdown
+
+                gdown.download(id=vocab_drive_id, output=vocab_path, quiet=True)
+                if os.path.exists(vocab_path):
+                    return self._load_vocab_file(vocab_path)
+            except Exception:
+                pass
+
+        src_vocab, tgt_vocab = self._build_vocab_from_multi30k()
+        try:
+            with open(vocab_path, "w", encoding="utf-8") as f:
+                json.dump({"src_vocab": src_vocab, "tgt_vocab": tgt_vocab}, f, ensure_ascii=False)
+        except Exception:
+            pass
+        return src_vocab, tgt_vocab
+
+    def _load_vocab_file(self, vocab_path: str):
+        with open(vocab_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if "src_vocab" not in data or "tgt_vocab" not in data:
+            raise ValueError("vocab.json must contain 'src_vocab' and 'tgt_vocab'.")
+        src_vocab = {k: int(v) for k, v in data["src_vocab"].items()}
+        tgt_vocab = {k: int(v) for k, v in data["tgt_vocab"].items()}
+        return src_vocab, tgt_vocab
+
+    def _build_vocab_from_multi30k(self):
+        from datasets import load_dataset
+
+        specials = ["<unk>", "<pad>", "<sos>", "<eos>"]
+        src_counter = Counter()
+        tgt_counter = Counter()
+        ds_train = load_dataset("bentrevett/multi30k", split="train")
+
+        for ex in ds_train:
+            src_tokens = [tok.text.lower() for tok in self.src_tokenizer(ex["de"]) if tok.text.strip()]
+            tgt_tokens = [tok.text.lower() for tok in self.tgt_tokenizer(ex["en"]) if tok.text.strip()]
+            src_counter.update(src_tokens)
+            tgt_counter.update(tgt_tokens)
+
+        src_vocab = {tok: idx for idx, tok in enumerate(specials)}
+        tgt_vocab = {tok: idx for idx, tok in enumerate(specials)}
+        for token, _ in sorted(src_counter.items(), key=lambda x: (-x[1], x[0])):
+            if token not in src_vocab:
+                src_vocab[token] = len(src_vocab)
+        for token, _ in sorted(tgt_counter.items(), key=lambda x: (-x[1], x[0])):
+            if token not in tgt_vocab:
+                tgt_vocab[token] = len(tgt_vocab)
+        return src_vocab, tgt_vocab
+
+    def _maybe_download_artifacts(self) -> None:
+        if self.checkpoint_path is None:
+            return
+        if os.path.exists(self.checkpoint_path):
+            return
+        ckpt_drive_id = os.getenv("A3_CKPT_DRIVE_ID")
+        if not ckpt_drive_id:
+            return
+        try:
+            import gdown
+
+            gdown.download(id=ckpt_drive_id, output=self.checkpoint_path, quiet=False)
+        except Exception:
+            pass
+
+    def _load_weights_from_checkpoint(self) -> None:
+        if self.checkpoint_path is None or not os.path.exists(self.checkpoint_path):
+            return
+        ckpt = torch.load(self.checkpoint_path, map_location="cpu")
+        loaded_state = ckpt.get("model_state_dict", ckpt)
+        current_state = self.state_dict()
+        compatible_state = {}
+        for k, v in loaded_state.items():
+            if k in current_state and current_state[k].shape == v.shape:
+                compatible_state[k] = v
+        current_state.update(compatible_state)
+        self.load_state_dict(current_state, strict=False)
 
     def encode(self, src: torch.Tensor, src_mask: torch.Tensor) -> torch.Tensor:
         src_emb = self.pos_enc(self.src_embed(src) * math.sqrt(self.d_model))
@@ -224,7 +358,51 @@ class Transformer(nn.Module):
         return self.decode(memory, src_mask, tgt, tgt_mask)
 
     def infer(self, src_sentence: str) -> str:
-        raise RuntimeError(
-            "infer() requires an external tokenizer/vocabulary pipeline. "
-            "Use train.py greedy_decode/evaluate utilities or attach your own preprocessing."
-        )
+        self.eval()
+        if not isinstance(src_sentence, str):
+            raise TypeError("src_sentence must be a string.")
+
+        src_tokens = [tok.text.lower() for tok in self.src_tokenizer(src_sentence.strip()) if tok.text.strip()]
+        src_tokens = ["<sos>"] + src_tokens + ["<eos>"]
+        src_ids = [self.src_vocab.get(tok, self.src_vocab["<unk>"]) for tok in src_tokens]
+
+        device = next(self.parameters()).device
+        src = torch.tensor(src_ids, dtype=torch.long, device=device).unsqueeze(0)
+        src_mask = make_src_mask(src, pad_idx=self.pad_idx)
+
+        with torch.no_grad():
+            memory = self.encode(src, src_mask)
+            ys = torch.full((1, 1), self.sos_idx, dtype=torch.long, device=device)
+            max_len = int(os.getenv("A3_INFER_MAX_LEN", "100"))
+
+            for _ in range(max_len - 1):
+                tgt_mask = make_tgt_mask(ys, pad_idx=self.pad_idx)
+                out = self.decode(memory, src_mask, ys, tgt_mask)
+                next_word = torch.argmax(out[:, -1, :], dim=-1).item()
+                ys = torch.cat([ys, torch.tensor([[next_word]], dtype=torch.long, device=device)], dim=1)
+                if next_word == self.eos_idx:
+                    break
+
+        pred_ids = ys.squeeze(0).tolist()
+        pred_tokens = []
+        for idx in pred_ids:
+            if idx in (self.sos_idx, self.pad_idx):
+                continue
+            if idx == self.eos_idx:
+                break
+            if 0 <= idx < len(self.tgt_itos):
+                pred_tokens.append(self.tgt_itos[idx])
+            else:
+                pred_tokens.append("<unk>")
+        return self._detokenize_en(pred_tokens)
+
+    def _detokenize_en(self, tokens) -> str:
+        if not tokens:
+            return ""
+        text = " ".join(tokens)
+        text = re.sub(r"\s+([.,!?;:])", r"\1", text)
+        text = re.sub(r"\(\s+", "(", text)
+        text = re.sub(r"\s+\)", ")", text)
+        text = re.sub(r"\s+'\s*", "'", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text

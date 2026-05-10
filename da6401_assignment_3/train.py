@@ -13,9 +13,10 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import json
 import random
 from collections import Counter
-from typing import Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -63,7 +64,7 @@ def run_epoch(
     scheduler=None,
     epoch_num: int = 0,
     is_train: bool = True,
-    device: str = "cuda",
+    device: str = "cpu",
 ) -> float:
     """
     Run one epoch of training or evaluation.
@@ -130,11 +131,11 @@ def greedy_decode(
     return ys
 
 
-def _extract_ngrams(tokens: list[str], n: int) -> Counter[tuple[str, ...]]:
+def _extract_ngrams(tokens: List[str], n: int) -> Counter[Tuple[str, ...]]:
     return Counter(tuple(tokens[i : i + n]) for i in range(len(tokens) - n + 1))
 
 
-def _corpus_bleu(references: list[list[str]], hypotheses: list[list[str]], max_n: int = 4) -> float:
+def _corpus_bleu(references: List[List[str]], hypotheses: List[List[str]], max_n: int = 4) -> float:
     if len(references) == 0 or len(hypotheses) == 0:
         return 0.0
 
@@ -196,8 +197,8 @@ def evaluate_bleu(
             return tgt_vocab.lookup_token(idx)
         return str(idx)
 
-    references: list[list[str]] = []
-    hypotheses: list[list[str]] = []
+    references: List[List[str]] = []
+    hypotheses: List[List[str]] = []
 
     model.eval()
     with torch.no_grad():
@@ -317,8 +318,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
 
     parser.add_argument("--checkpoint-path", type=str, default="checkpoint.pt")
+    parser.add_argument("--vocab-save-path", type=str, default="vocab.json")
     parser.add_argument("--resume-from", type=str, default=None)
     parser.add_argument("--save-every", type=int, default=1)
+    parser.add_argument("--early-stop-patience", type=int, default=0)
     parser.add_argument("--eval-only", action="store_true")
     parser.add_argument("--bleu-max-len", type=int, default=100)
 
@@ -360,6 +363,8 @@ def run_training_experiment() -> None:
         max_test_samples=args.max_test_samples,
         cache_dir=args.cache_dir,
     )
+    with open(args.vocab_save_path, "w", encoding="utf-8") as f:
+        json.dump({"src_vocab": src_vocab.stoi, "tgt_vocab": tgt_vocab.stoi}, f, ensure_ascii=False)
 
     model = Transformer(
         src_vocab_size=len(src_vocab),
@@ -415,6 +420,10 @@ def run_training_experiment() -> None:
             wandb_run.finish()
         return
 
+    best_val_loss = float("inf")
+    best_epoch = -1
+    bad_epochs = 0
+
     for epoch in range(start_epoch, args.epochs):
         train_loss = run_epoch(
             train_loader,
@@ -442,6 +451,15 @@ def run_training_experiment() -> None:
             f"train_loss={train_loss:.4f} | val_loss={val_loss:.4f} | lr={lr_now:.6e}"
         )
 
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            best_epoch = epoch
+            bad_epochs = 0
+            save_checkpoint(model, optimizer, scheduler, epoch, path=args.checkpoint_path)
+            print(f"Saved best checkpoint at epoch {epoch + 1} (val_loss={val_loss:.4f}).")
+        else:
+            bad_epochs += 1
+
         if wandb_run is not None:
             wandb_run.log(
                 {
@@ -449,15 +467,25 @@ def run_training_experiment() -> None:
                     "train_loss": train_loss,
                     "val_loss": val_loss,
                     "lr": lr_now,
+                    "best_val_loss": best_val_loss,
                 }
             )
 
         if ((epoch + 1) % args.save_every) == 0:
-            save_checkpoint(model, optimizer, scheduler, epoch, path=args.checkpoint_path)
+            save_checkpoint(model, optimizer, scheduler, epoch, path=f"{args.checkpoint_path}.latest")
 
-    save_checkpoint(model, optimizer, scheduler, args.epochs - 1, path=args.checkpoint_path)
-    print(f"Saved checkpoint to: {args.checkpoint_path}")
+        if args.early_stop_patience > 0 and bad_epochs >= args.early_stop_patience:
+            print(
+                f"Early stopping at epoch {epoch + 1}: "
+                f"no val_loss improvement for {args.early_stop_patience} epochs."
+            )
+            break
 
+    if best_epoch >= 0:
+        print(f"Best checkpoint: epoch {best_epoch + 1}, val_loss={best_val_loss:.4f}, path={args.checkpoint_path}")
+
+    if os.path.exists(args.checkpoint_path):
+        load_checkpoint(args.checkpoint_path, model, optimizer=None, scheduler=None)
     test_bleu = evaluate_bleu(model, test_loader, tgt_vocab, device=device, max_len=args.bleu_max_len)
     print(f"Final test BLEU: {test_bleu:.4f}")
 

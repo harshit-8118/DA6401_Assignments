@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from typing import Callable, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import spacy
 import torch
@@ -15,8 +15,8 @@ SPECIAL_TOKENS = ["<unk>", "<pad>", "<sos>", "<eos>"]
 
 @dataclass
 class Vocab:
-    stoi: dict[str, int]
-    itos: list[str]
+    stoi: Dict[str, int]
+    itos: List[str]
 
     @classmethod
     def build(
@@ -52,16 +52,16 @@ class Vocab:
         return self.stoi.get(token, self.stoi["<unk>"])
 
 
-def build_spacy_tokenizer(lang: str) -> Callable[[str], list[str]]:
+def build_spacy_tokenizer(lang: str) -> Callable[[str], List[str]]:
     nlp = spacy.blank(lang)
 
-    def tokenize(text: str) -> list[str]:
+    def tokenize(text: str) -> List[str]:
         return [tok.text.lower() for tok in nlp.tokenizer(text.strip()) if tok.text.strip()]
 
     return tokenize
 
 
-def _add_special_tokens(tokens: Sequence[str]) -> list[str]:
+def _add_special_tokens(tokens: Sequence[str]) -> List[str]:
     return ["<sos>", *tokens, "<eos>"]
 
 
@@ -76,14 +76,14 @@ class Multi30kTorchDataset(Dataset):
     def __init__(
         self,
         hf_split,
-        src_tokenizer: Callable[[str], list[str]],
-        tgt_tokenizer: Callable[[str], list[str]],
+        src_tokenizer: Callable[[str], List[str]],
+        tgt_tokenizer: Callable[[str], List[str]],
         src_vocab: Vocab,
         tgt_vocab: Vocab,
         max_src_len: Optional[int] = None,
         max_tgt_len: Optional[int] = None,
     ) -> None:
-        self.samples: list[tuple[torch.Tensor, torch.Tensor]] = []
+        self.samples: List[Tuple[torch.Tensor, torch.Tensor]] = []
         for example in hf_split:
             src_tokens = _add_special_tokens(src_tokenizer(example["de"]))
             tgt_tokens = _add_special_tokens(tgt_tokenizer(example["en"]))
@@ -109,7 +109,7 @@ class Multi30kTorchDataset(Dataset):
     def __len__(self) -> int:
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.samples[idx]
 
 

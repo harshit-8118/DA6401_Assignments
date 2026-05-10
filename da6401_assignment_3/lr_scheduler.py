@@ -1,4 +1,5 @@
 import math
+from typing import List
 import torch.optim as optim
 from torch.optim.lr_scheduler import LRScheduler
 
@@ -13,12 +14,12 @@ class NoamScheduler(LRScheduler):
         step = self.last_epoch + 1
         return (self.d_model ** -0.5) * min(step ** -0.5, step * (self.warmup_steps ** -1.5))
 
-    def get_lr(self) -> list[float]:
+    def get_lr(self) -> List[float]:
         scale = self._get_lr_scale()
         return [base_lr * scale for base_lr in self.base_lrs]
 
 
-def get_lr_history(d_model: int, warmup_steps: int, total_steps: int) -> list[float]:
+def get_lr_history(d_model: int, warmup_steps: int, total_steps: int) -> List[float]:
     dummy_model = __import__('torch').nn.Linear(1, 1)
     optimizer = optim.Adam(dummy_model.parameters(), lr=1.0)
     scheduler = NoamScheduler(optimizer, d_model=d_model, warmup_steps=warmup_steps)

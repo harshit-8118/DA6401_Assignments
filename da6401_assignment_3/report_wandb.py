@@ -94,6 +94,7 @@ def create_model(
     tgt_vocab_size: int,
     args,
     learned_positional: bool = False,
+    checkpoint_path: Optional[str] = None,
 ):
     model_cls = LearnedPositionalTransformer if learned_positional else Transformer
     model = model_cls(
@@ -104,7 +105,7 @@ def create_model(
         num_heads=args.num_heads,
         d_ff=args.d_ff,
         dropout=args.dropout,
-        checkpoint_path=None,
+        checkpoint_path=checkpoint_path,
     )
     return model
 
@@ -351,8 +352,9 @@ def experiment_scaling_ablation(args, wandb_run) -> None:
         )
 
 
-def attach_last_encoder_attention_capture(model: Transformer) -> None:
-    target = model.encoder.layers[-1].self_attn
+def attach_last_decoder_attention_capture(model: Transformer) -> None:
+    target_self = model.decoder.layers[-1].self_attn
+    target_cross = model.decoder.layers[-1].cross_attn
 
     def forward_with_capture(self, query, key, value, mask=None):
         bsz = query.size(0)
@@ -369,56 +371,100 @@ def attach_last_encoder_attention_capture(model: Transformer) -> None:
         out = out.transpose(1, 2).contiguous().view(bsz, -1, self.d_model)
         return self.w_o(out)
 
-    target.forward = MethodType(forward_with_capture, target)
+    target_self.forward = MethodType(forward_with_capture, target_self)
+    target_cross.forward = MethodType(forward_with_capture, target_cross)
 
 
 def experiment_head_specialization(args, wandb_run) -> None:
     train_loader, val_loader, test_loader, src_vocab, tgt_vocab = get_dataloaders(args, args.device_resolved)
-    model = create_model(len(src_vocab), len(tgt_vocab), args)
+    ckpt_path = args.head_checkpoint_path if args.head_checkpoint_path else None
+    if ckpt_path is not None and not ckpt_path.strip():
+        ckpt_path = None
+    model = create_model(len(src_vocab), len(tgt_vocab), args, checkpoint_path=ckpt_path)
     model = model.to(args.device_resolved)
 
-    # Quick training if not loading external checkpoint
-    _ = train_and_eval(
-        model,
-        train_loader,
-        val_loader,
-        test_loader,
-        tgt_vocab,
-        args,
-        scheduler_mode="noam",
-        label_smoothing=args.label_smoothing,
-        run_prefix="head_exp",
-        wandb_run=wandb_run,
-    )
+    if args.head_train_epochs > 0:
+        original_epochs = args.epochs
+        args.epochs = args.head_train_epochs
+        _ = train_and_eval(
+            model,
+            train_loader,
+            val_loader,
+            test_loader,
+            tgt_vocab,
+            args,
+            scheduler_mode="noam",
+            label_smoothing=args.label_smoothing,
+            run_prefix="head_exp",
+            wandb_run=wandb_run,
+        )
+        args.epochs = original_epochs
 
-    attach_last_encoder_attention_capture(model)
+    attach_last_decoder_attention_capture(model)
     model.eval()
-    src_batch, _ = next(iter(test_loader))
-    src = src_batch[0:1].to(args.device_resolved)
+
+    src, tgt = select_probe_pair(test_loader, model, args)
+    src = src.to(args.device_resolved)
+    tgt = tgt.to(args.device_resolved)
+    tgt_in = tgt[:, :-1]
     src_mask = make_src_mask(src)
+    tgt_mask = make_tgt_mask(tgt_in)
     with torch.no_grad():
-        _ = model.encode(src, src_mask)
+        memory = model.encode(src, src_mask)
+        _ = model.decode(memory, src_mask, tgt_in, tgt_mask)
 
-    attn = model.encoder.layers[-1].self_attn.last_attn  # [1, heads, q, k]
-    if attn is None:
+    self_attn = model.decoder.layers[-1].self_attn.last_attn  # [1, heads, tgt_len, tgt_len]
+    cross_attn = model.decoder.layers[-1].cross_attn.last_attn  # [1, heads, tgt_len, src_len]
+    if self_attn is None or cross_attn is None:
         return
-    attn = attn[0]
-    token_ids = src[0].detach().cpu().tolist()
-    src_tokens = [src_vocab.lookup_token(i) if i < len(src_vocab.itos) else "<unk>" for i in token_ids]
+    self_attn = self_attn[0]
+    cross_attn = cross_attn[0]
 
-    for h in range(attn.size(0)):
-        mat = attn[h].numpy()
-        values = mat.reshape(-1).tolist()
-        table = wandb.Table(data=[[v] for v in values], columns=["weight"])
-        histogram = wandb.plot.histogram(table, value="weight", title=f"Head {h} attention weights")
-        wandb_run.log({f"head_{h}_attn_hist": histogram})
+    src_ids = src[0].detach().cpu().tolist()
+    tgt_ids = tgt_in[0].detach().cpu().tolist()
+    src_ids = trim_pad(src_ids, model.pad_idx)
+    tgt_ids = trim_pad(tgt_ids, model.pad_idx)
 
-        if args.log_heatmaps:
-            try:
-                heatmap = wandb.plots.HeatMap(src_tokens, src_tokens, mat.tolist(), show_text=False)
-                wandb_run.log({f"head_{h}_attn_heatmap": heatmap})
-            except Exception:
-                pass
+    src_tokens = [src_vocab.lookup_token(i) if i < len(src_vocab.itos) else "<unk>" for i in src_ids]
+    tgt_tokens = [tgt_vocab.lookup_token(i) if i < len(tgt_vocab.itos) else "<unk>" for i in tgt_ids]
+    src_labels = positional_labels(src_tokens)
+    tgt_labels = positional_labels(tgt_tokens)
+    self_attn = self_attn[:, : len(tgt_tokens), : len(tgt_tokens)]
+    cross_attn = cross_attn[:, : len(tgt_tokens), : len(src_tokens)]
+
+    for h in range(self_attn.size(0)):
+        self_mat = self_attn[h].numpy()
+        self_values = self_mat.reshape(-1).tolist()
+        self_table = wandb.Table(data=[[v] for v in self_values], columns=["weight"])
+        self_hist = wandb.plot.histogram(self_table, value="weight", title=f"Decoder self-attn head {h} weights")
+        wandb_run.log({f"decoder_self_head_{h}_attn_hist": self_hist})
+        log_attention_heatmap_custom_chart(
+            wandb_run=wandb_run,
+            key=f"decoder_self_head_{h}_attn_heatmap",
+            matrix=self_mat,
+            x_labels=tgt_labels,
+            y_labels=tgt_labels,
+            vega_spec_name=args.heatmap_spec_name,
+            title=f"Decoder self-attn head {h}",
+        )
+
+        if args.log_cross_attention:
+            cross_mat = cross_attn[h].numpy()
+            cross_values = cross_mat.reshape(-1).tolist()
+            cross_table = wandb.Table(data=[[v] for v in cross_values], columns=["weight"])
+            cross_hist = wandb.plot.histogram(
+                cross_table, value="weight", title=f"Decoder cross-attn head {h} weights"
+            )
+            wandb_run.log({f"decoder_cross_head_{h}_attn_hist": cross_hist})
+            log_attention_heatmap_custom_chart(
+                wandb_run=wandb_run,
+                key=f"decoder_cross_head_{h}_attn_heatmap",
+                matrix=cross_mat,
+                x_labels=src_labels,
+                y_labels=tgt_labels,
+                vega_spec_name=args.heatmap_spec_name,
+                title=f"Decoder cross-attn head {h}",
+            )
 
 
 def collect_prediction_confidences(model, data_loader, tgt_vocab, device: str, max_batches: int = 20) -> List[float]:
@@ -443,6 +489,91 @@ def collect_prediction_confidences(model, data_loader, tgt_vocab, device: str, m
             if batches >= max_batches:
                 break
     return confidences
+
+
+def trim_pad(token_ids: List[int], pad_idx: int) -> List[int]:
+    if pad_idx in token_ids:
+        return token_ids[: token_ids.index(pad_idx)]
+    return token_ids
+
+
+def positional_labels(tokens: List[str]) -> List[str]:
+    return [f"{i:02d}:{tok}" for i, tok in enumerate(tokens)]
+
+
+def select_probe_pair(test_loader, model: Transformer, args):
+    if args.head_sentence is not None:
+        de_tokens = [tok.text.lower() for tok in model.src_tokenizer(args.head_sentence.strip()) if tok.text.strip()]
+        if len(de_tokens) != args.head_words:
+            print(
+                f"[warn] Provided head sentence has {len(de_tokens)} tokens, expected {args.head_words}."
+            )
+        de_tokens = ["<sos>"] + de_tokens + ["<eos>"]
+        src_ids = [model.src_vocab.get(t, model.src_vocab["<unk>"]) for t in de_tokens]
+
+        if args.head_target_sentence is not None:
+            en_tokens = [tok.text.lower() for tok in model.tgt_tokenizer(args.head_target_sentence.strip()) if tok.text.strip()]
+            en_tokens = ["<sos>"] + en_tokens + ["<eos>"]
+            tgt_ids = [model.tgt_vocab.get(t, model.tgt_vocab["<unk>"]) for t in en_tokens]
+        else:
+            # fallback to model inference if explicit English target is not provided
+            pred = model.infer(args.head_sentence)
+            en_tokens = [tok.text.lower() for tok in model.tgt_tokenizer(pred.strip()) if tok.text.strip()]
+            en_tokens = ["<sos>"] + en_tokens + ["<eos>"]
+            tgt_ids = [model.tgt_vocab.get(t, model.tgt_vocab["<unk>"]) for t in en_tokens]
+
+        src = torch.tensor(src_ids, dtype=torch.long).unsqueeze(0)
+        tgt = torch.tensor(tgt_ids, dtype=torch.long).unsqueeze(0)
+        return src, tgt
+
+    target_words = args.head_words
+    best = None
+    best_gap = 10**9
+    for src_batch, tgt_batch in test_loader:
+        for i in range(src_batch.size(0)):
+            src_ids = src_batch[i].tolist()
+            tgt_ids = tgt_batch[i].tolist()
+            src_ids_trim = trim_pad(src_ids, model.pad_idx)
+            # remove <sos>, <eos> if present for counting words
+            core = [t for t in src_ids_trim if t not in (model.sos_idx, model.eos_idx, model.pad_idx)]
+            gap = abs(len(core) - target_words)
+            if gap < best_gap:
+                best_gap = gap
+                best = (
+                    torch.tensor(src_ids_trim, dtype=torch.long).unsqueeze(0),
+                    torch.tensor(trim_pad(tgt_ids, model.pad_idx), dtype=torch.long).unsqueeze(0),
+                )
+            if gap == 0:
+                return best
+    if best is None:
+        src_batch, tgt_batch = next(iter(test_loader))
+        return src_batch[0:1].cpu(), tgt_batch[0:1].cpu()
+    return best
+
+
+def log_attention_heatmap_custom_chart(
+    wandb_run,
+    key: str,
+    matrix: np.ndarray,
+    x_labels: List[str],
+    y_labels: List[str],
+    vega_spec_name: str,
+    title: str,
+) -> None:
+    rows = []
+    for i, y in enumerate(y_labels):
+        for j, x in enumerate(x_labels):
+            val = float(matrix[i, j])
+            rows.append([x, y, val])
+
+    table = wandb.Table(data=rows, columns=["x", "y", "value"])
+    chart = wandb.plot_table(
+        vega_spec_name=vega_spec_name,
+        data_table=table,
+        fields={"x": "x", "y": "y", "value": "value"},
+        string_fields={"title": title},
+    )
+    wandb_run.log({key: chart})
 
 
 def experiment_positional_vs_learned(args, wandb_run) -> None:
@@ -574,7 +705,18 @@ def parse_args():
     parser.add_argument("--scaling-fixed-lr", type=float, default=1e-4)
     parser.add_argument("--log-every-steps", type=int, default=25)
     parser.add_argument("--confidence-batches", type=int, default=20)
-    parser.add_argument("--log-heatmaps", action="store_true")
+    parser.add_argument("--head-sentence", type=str, default=None)
+    parser.add_argument("--head-sentence-lang", type=str, default="de", choices=["de", "en"])
+    parser.add_argument("--head-target-sentence", type=str, default=None)
+    parser.add_argument("--head-words", type=int, default=10)
+    parser.add_argument("--head-checkpoint-path", type=str, default="checkpoint.pt")
+    parser.add_argument("--head-train-epochs", type=int, default=0)
+    parser.add_argument(
+        "--heatmap-spec-name",
+        type=str,
+        default="da25s003-indian-institute-of-technology-madras/my_heatmap",
+    )
+    parser.add_argument("--log-cross-attention", action="store_true")
     return parser.parse_args()
 
 

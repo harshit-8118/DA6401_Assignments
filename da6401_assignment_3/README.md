@@ -1,9 +1,11 @@
 # DA6401 Assignment 3 - Transformer (German -> English)
 
 **NAME:**: Harshit Shukla
+
 **ROLL NO:** DA25S003
 
 **GITHUB_LINK:** [https://github.com/harshit-8118/DA6401_Assignments/tree/master/da6401_assignment_3](https://github.com/harshit-8118/DA6401_Assignments/tree/master/da6401_assignment_3)
+
 **WANDB_LINK:** [https://wandb.ai/da25s003-indian-institute-of-technology-madras/DA6401-Assignment_3/reports/Untitled-Report--VmlldzoxNjgzNDY4NA?accessToken=ij492cgciydjuwesv2bkypj7nf8qh1iax742w6awtzlfbbc3u0ez40iznciw1m23](https://wandb.ai/da25s003-indian-institute-of-technology-madras/DA6401-Assignment_3/reports/Untitled-Report--VmlldzoxNjgzNDY4NA?accessToken=ij492cgciydjuwesv2bkypj7nf8qh1iax742w6awtzlfbbc3u0ez40iznciw1m23)
 
 This repo now contains a complete training pipeline for Multi30k using:

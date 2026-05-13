@@ -194,9 +194,16 @@ def train_and_eval(
 
     if best_state is not None:
         model.load_state_dict(best_state)
+    val_bleu = evaluate_bleu(model, val_loader, tgt_vocab, device=device, max_len=args.bleu_max_len)
     test_bleu = evaluate_bleu(model, test_loader, tgt_vocab, device=device, max_len=args.bleu_max_len)
-    wandb_run.log({f"{run_prefix}/test_bleu": test_bleu, f"{run_prefix}/best_val_loss": best_val})
-    return {"best_val_loss": best_val, "test_bleu": test_bleu}
+    wandb_run.log(
+        {
+            f"{run_prefix}/val_bleu": val_bleu,
+            f"{run_prefix}/test_bleu": test_bleu,
+            f"{run_prefix}/best_val_loss": best_val,
+        }
+    )
+    return {"best_val_loss": best_val, "val_bleu": val_bleu, "test_bleu": test_bleu}
 
 
 def experiment_noam_vs_fixed(args, wandb_run) -> None:
@@ -352,9 +359,8 @@ def experiment_scaling_ablation(args, wandb_run) -> None:
         )
 
 
-def attach_last_decoder_attention_capture(model: Transformer) -> None:
-    target_self = model.decoder.layers[-1].self_attn
-    target_cross = model.decoder.layers[-1].cross_attn
+def attach_last_encoder_attention_capture(model: Transformer) -> None:
+    target_self = model.encoder.layers[-1].self_attn
 
     def forward_with_capture(self, query, key, value, mask=None):
         bsz = query.size(0)
@@ -372,7 +378,6 @@ def attach_last_decoder_attention_capture(model: Transformer) -> None:
         return self.w_o(out)
 
     target_self.forward = MethodType(forward_with_capture, target_self)
-    target_cross.forward = MethodType(forward_with_capture, target_cross)
 
 
 def experiment_head_specialization(args, wandb_run) -> None:
@@ -400,71 +405,42 @@ def experiment_head_specialization(args, wandb_run) -> None:
         )
         args.epochs = original_epochs
 
-    attach_last_decoder_attention_capture(model)
+    attach_last_encoder_attention_capture(model)
     model.eval()
 
-    src, tgt = select_probe_pair(test_loader, model, args)
+    src = select_probe_german_sentence(test_loader, model, args)
     src = src.to(args.device_resolved)
-    tgt = tgt.to(args.device_resolved)
-    tgt_in = tgt[:, :-1]
     src_mask = make_src_mask(src)
-    tgt_mask = make_tgt_mask(tgt_in)
     with torch.no_grad():
-        memory = model.encode(src, src_mask)
-        _ = model.decode(memory, src_mask, tgt_in, tgt_mask)
+        _ = model.encode(src, src_mask)
 
-    self_attn = model.decoder.layers[-1].self_attn.last_attn  # [1, heads, tgt_len, tgt_len]
-    cross_attn = model.decoder.layers[-1].cross_attn.last_attn  # [1, heads, tgt_len, src_len]
-    if self_attn is None or cross_attn is None:
+    self_attn = model.encoder.layers[-1].self_attn.last_attn  # [1, heads, src_len, src_len]
+    if self_attn is None:
         return
     self_attn = self_attn[0]
-    cross_attn = cross_attn[0]
 
     src_ids = src[0].detach().cpu().tolist()
-    tgt_ids = tgt_in[0].detach().cpu().tolist()
     src_ids = trim_pad(src_ids, model.pad_idx)
-    tgt_ids = trim_pad(tgt_ids, model.pad_idx)
 
     src_tokens = [src_vocab.lookup_token(i) if i < len(src_vocab.itos) else "<unk>" for i in src_ids]
-    tgt_tokens = [tgt_vocab.lookup_token(i) if i < len(tgt_vocab.itos) else "<unk>" for i in tgt_ids]
     src_labels = positional_labels(src_tokens)
-    tgt_labels = positional_labels(tgt_tokens)
-    self_attn = self_attn[:, : len(tgt_tokens), : len(tgt_tokens)]
-    cross_attn = cross_attn[:, : len(tgt_tokens), : len(src_tokens)]
+    self_attn = self_attn[:, : len(src_tokens), : len(src_tokens)]
 
     for h in range(self_attn.size(0)):
         self_mat = self_attn[h].numpy()
         self_values = self_mat.reshape(-1).tolist()
         self_table = wandb.Table(data=[[v] for v in self_values], columns=["weight"])
-        self_hist = wandb.plot.histogram(self_table, value="weight", title=f"Decoder self-attn head {h} weights")
-        wandb_run.log({f"decoder_self_head_{h}_attn_hist": self_hist})
+        self_hist = wandb.plot.histogram(self_table, value="weight", title=f"Encoder head {h} attention weights")
+        wandb_run.log({f"encoder_head_{h}_attn_hist": self_hist})
         log_attention_heatmap_custom_chart(
             wandb_run=wandb_run,
-            key=f"decoder_self_head_{h}_attn_heatmap",
+            key=f"encoder_head_{h}_attn_heatmap",
             matrix=self_mat,
-            x_labels=tgt_labels,
-            y_labels=tgt_labels,
+            x_labels=src_labels,
+            y_labels=src_labels,
             vega_spec_name=args.heatmap_spec_name,
-            title=f"Decoder self-attn head {h}",
+            title=f"Encoder self-attn head {h}",
         )
-
-        if args.log_cross_attention:
-            cross_mat = cross_attn[h].numpy()
-            cross_values = cross_mat.reshape(-1).tolist()
-            cross_table = wandb.Table(data=[[v] for v in cross_values], columns=["weight"])
-            cross_hist = wandb.plot.histogram(
-                cross_table, value="weight", title=f"Decoder cross-attn head {h} weights"
-            )
-            wandb_run.log({f"decoder_cross_head_{h}_attn_hist": cross_hist})
-            log_attention_heatmap_custom_chart(
-                wandb_run=wandb_run,
-                key=f"decoder_cross_head_{h}_attn_heatmap",
-                matrix=cross_mat,
-                x_labels=src_labels,
-                y_labels=tgt_labels,
-                vega_spec_name=args.heatmap_spec_name,
-                title=f"Decoder cross-attn head {h}",
-            )
 
 
 def collect_prediction_confidences(model, data_loader, tgt_vocab, device: str, max_batches: int = 20) -> List[float]:
@@ -491,6 +467,38 @@ def collect_prediction_confidences(model, data_loader, tgt_vocab, device: str, m
     return confidences
 
 
+def summarize_confidence(prefix: str, conf: List[float], wandb_run) -> None:
+    if not conf:
+        return
+    arr = np.asarray(conf, dtype=np.float64)
+    wandb_run.summary[f"{prefix}/mean"] = float(np.mean(arr))
+    wandb_run.summary[f"{prefix}/std"] = float(np.std(arr))
+    wandb_run.summary[f"{prefix}/p90"] = float(np.percentile(arr, 90))
+    wandb_run.summary[f"{prefix}/p95"] = float(np.percentile(arr, 95))
+    wandb_run.summary[f"{prefix}/gt_095_frac"] = float(np.mean(arr > 0.95))
+    wandb_run.summary[f"{prefix}/lt_010_frac"] = float(np.mean(arr < 0.10))
+
+
+def log_normalized_confidence_distribution(
+    key: str,
+    title: str,
+    conf: List[float],
+    wandb_run,
+    bins: int = 20,
+) -> None:
+    if not conf:
+        return
+    arr = np.asarray(conf, dtype=np.float64)
+    hist, edges = np.histogram(arr, bins=bins, range=(0.0, 1.0), density=False)
+    frac = hist / max(hist.sum(), 1)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+
+    rows = [[float(c), float(f)] for c, f in zip(centers, frac)]
+    table = wandb.Table(data=rows, columns=["bin_center", "fraction"])
+    chart = wandb.plot.bar(table, "bin_center", "fraction", title=title)
+    wandb_run.log({key: chart})
+
+
 def trim_pad(token_ids: List[int], pad_idx: int) -> List[int]:
     if pad_idx in token_ids:
         return token_ids[: token_ids.index(pad_idx)]
@@ -501,7 +509,7 @@ def positional_labels(tokens: List[str]) -> List[str]:
     return [f"{i:02d}:{tok}" for i, tok in enumerate(tokens)]
 
 
-def select_probe_pair(test_loader, model: Transformer, args):
+def select_probe_german_sentence(test_loader, model: Transformer, args):
     if args.head_sentence is not None:
         de_tokens = [tok.text.lower() for tok in model.src_tokenizer(args.head_sentence.strip()) if tok.text.strip()]
         if len(de_tokens) != args.head_words:
@@ -510,21 +518,8 @@ def select_probe_pair(test_loader, model: Transformer, args):
             )
         de_tokens = ["<sos>"] + de_tokens + ["<eos>"]
         src_ids = [model.src_vocab.get(t, model.src_vocab["<unk>"]) for t in de_tokens]
-
-        if args.head_target_sentence is not None:
-            en_tokens = [tok.text.lower() for tok in model.tgt_tokenizer(args.head_target_sentence.strip()) if tok.text.strip()]
-            en_tokens = ["<sos>"] + en_tokens + ["<eos>"]
-            tgt_ids = [model.tgt_vocab.get(t, model.tgt_vocab["<unk>"]) for t in en_tokens]
-        else:
-            # fallback to model inference if explicit English target is not provided
-            pred = model.infer(args.head_sentence)
-            en_tokens = [tok.text.lower() for tok in model.tgt_tokenizer(pred.strip()) if tok.text.strip()]
-            en_tokens = ["<sos>"] + en_tokens + ["<eos>"]
-            tgt_ids = [model.tgt_vocab.get(t, model.tgt_vocab["<unk>"]) for t in en_tokens]
-
         src = torch.tensor(src_ids, dtype=torch.long).unsqueeze(0)
-        tgt = torch.tensor(tgt_ids, dtype=torch.long).unsqueeze(0)
-        return src, tgt
+        return src
 
     target_words = args.head_words
     best = None
@@ -532,22 +527,18 @@ def select_probe_pair(test_loader, model: Transformer, args):
     for src_batch, tgt_batch in test_loader:
         for i in range(src_batch.size(0)):
             src_ids = src_batch[i].tolist()
-            tgt_ids = tgt_batch[i].tolist()
             src_ids_trim = trim_pad(src_ids, model.pad_idx)
             # remove <sos>, <eos> if present for counting words
             core = [t for t in src_ids_trim if t not in (model.sos_idx, model.eos_idx, model.pad_idx)]
             gap = abs(len(core) - target_words)
             if gap < best_gap:
                 best_gap = gap
-                best = (
-                    torch.tensor(src_ids_trim, dtype=torch.long).unsqueeze(0),
-                    torch.tensor(trim_pad(tgt_ids, model.pad_idx), dtype=torch.long).unsqueeze(0),
-                )
+                best = torch.tensor(src_ids_trim, dtype=torch.long).unsqueeze(0)
             if gap == 0:
                 return best
     if best is None:
         src_batch, tgt_batch = next(iter(test_loader))
-        return src_batch[0:1].cpu(), tgt_batch[0:1].cpu()
+        return src_batch[0:1].cpu()
     return best
 
 
@@ -607,8 +598,13 @@ def experiment_positional_vs_learned(args, wandb_run) -> None:
         wandb_run=wandb_run,
     )
 
+    wandb_run.summary["sinusoidal_val_bleu"] = stats_sin["val_bleu"]
+    wandb_run.summary["learned_pos_val_bleu"] = stats_learned["val_bleu"]
     wandb_run.summary["sinusoidal_test_bleu"] = stats_sin["test_bleu"]
     wandb_run.summary["learned_pos_test_bleu"] = stats_learned["test_bleu"]
+    wandb_run.summary["positional_val_bleu_delta_learned_minus_sinusoidal"] = (
+        stats_learned["val_bleu"] - stats_sin["val_bleu"]
+    )
 
 
 def experiment_label_smoothing(args, wandb_run) -> None:
@@ -631,6 +627,14 @@ def experiment_label_smoothing(args, wandb_run) -> None:
     table_ls = wandb.Table(data=[[v] for v in conf_ls], columns=["confidence"])
     hist_ls = wandb.plot.histogram(table_ls, value="confidence", title="Prediction confidence (label smoothing 0.1)")
     wandb_run.log({"ls_0_1/confidence_hist": hist_ls})
+    log_normalized_confidence_distribution(
+        key="ls_0_1/confidence_fraction_bins",
+        title="Prediction confidence fraction by bin (label smoothing 0.1)",
+        conf=conf_ls,
+        wandb_run=wandb_run,
+        bins=args.confidence_bins,
+    )
+    summarize_confidence("ls_0_1/confidence", conf_ls, wandb_run)
 
     model_ce = create_model(len(src_vocab), len(tgt_vocab), args)
     _ = train_and_eval(
@@ -649,6 +653,14 @@ def experiment_label_smoothing(args, wandb_run) -> None:
     table_ce = wandb.Table(data=[[v] for v in conf_ce], columns=["confidence"])
     hist_ce = wandb.plot.histogram(table_ce, value="confidence", title="Prediction confidence (label smoothing 0.0)")
     wandb_run.log({"ls_0_0/confidence_hist": hist_ce})
+    log_normalized_confidence_distribution(
+        key="ls_0_0/confidence_fraction_bins",
+        title="Prediction confidence fraction by bin (label smoothing 0.0)",
+        conf=conf_ce,
+        wandb_run=wandb_run,
+        bins=args.confidence_bins,
+    )
+    summarize_confidence("ls_0_0/confidence", conf_ce, wandb_run)
 
 
 def parse_args():
@@ -705,9 +717,8 @@ def parse_args():
     parser.add_argument("--scaling-fixed-lr", type=float, default=1e-4)
     parser.add_argument("--log-every-steps", type=int, default=25)
     parser.add_argument("--confidence-batches", type=int, default=20)
+    parser.add_argument("--confidence-bins", type=int, default=20)
     parser.add_argument("--head-sentence", type=str, default=None)
-    parser.add_argument("--head-sentence-lang", type=str, default="de", choices=["de", "en"])
-    parser.add_argument("--head-target-sentence", type=str, default=None)
     parser.add_argument("--head-words", type=int, default=10)
     parser.add_argument("--head-checkpoint-path", type=str, default="checkpoint.pt")
     parser.add_argument("--head-train-epochs", type=int, default=0)
@@ -716,7 +727,6 @@ def parse_args():
         type=str,
         default="da25s003-indian-institute-of-technology-madras/my_heatmap",
     )
-    parser.add_argument("--log-cross-attention", action="store_true")
     return parser.parse_args()
 
 

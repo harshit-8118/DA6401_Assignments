@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import math
+import os
 import random
 from types import MethodType
 from typing import Dict, List, Optional, Tuple
@@ -125,6 +126,33 @@ def get_dataloaders(args, device: str):
         max_test_samples=args.max_test_samples,
         cache_dir=args.cache_dir,
     )
+
+
+def ensure_head_checkpoint(args) -> str:
+    ckpt_path = args.head_checkpoint_path.strip() if args.head_checkpoint_path else ""
+    if not ckpt_path:
+        raise ValueError("Task 2.3 requires --head-checkpoint-path.")
+
+    should_download = args.head_force_gdrive_download or (not os.path.exists(ckpt_path))
+    if should_download:
+        ckpt_drive_id = args.head_ckpt_drive_id or os.getenv("A3_CKPT_DRIVE_ID", "1EjAiHVs1JzynUQ5eciAamwsgb5rWZyri")
+        if args.verbose_head:
+            print(f"[head_specialization] Downloading checkpoint from Google Drive id={ckpt_drive_id} -> {ckpt_path}")
+        try:
+            import gdown
+
+            gdown.download(id=ckpt_drive_id, output=ckpt_path, quiet=not args.verbose_head)
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to download checkpoint from Google Drive (id={ckpt_drive_id}). "
+                f"Install gdown and verify Drive access. Original error: {exc}"
+            ) from exc
+    elif args.verbose_head:
+        print(f"[head_specialization] Using local checkpoint: {ckpt_path}")
+
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint path not found after resolution: {ckpt_path}")
+    return ckpt_path
 
 
 def train_and_eval(
@@ -381,35 +409,21 @@ def attach_last_encoder_attention_capture(model: Transformer) -> None:
 
 
 def experiment_head_specialization(args, wandb_run) -> None:
-    train_loader, val_loader, test_loader, src_vocab, tgt_vocab = get_dataloaders(args, args.device_resolved)
-    ckpt_path = args.head_checkpoint_path if args.head_checkpoint_path else None
-    if ckpt_path is not None and not ckpt_path.strip():
-        ckpt_path = None
+    _, _, test_loader, src_vocab, tgt_vocab = get_dataloaders(args, args.device_resolved)
+    ckpt_path = ensure_head_checkpoint(args)
+    if args.head_train_epochs > 0:
+        print("[head_specialization] Ignoring --head-train-epochs for Task 2.3 (checkpoint-only analysis mode).")
     model = create_model(len(src_vocab), len(tgt_vocab), args, checkpoint_path=ckpt_path)
     model = model.to(args.device_resolved)
-
-    if args.head_train_epochs > 0:
-        original_epochs = args.epochs
-        args.epochs = args.head_train_epochs
-        _ = train_and_eval(
-            model,
-            train_loader,
-            val_loader,
-            test_loader,
-            tgt_vocab,
-            args,
-            scheduler_mode="noam",
-            label_smoothing=args.label_smoothing,
-            run_prefix="head_exp",
-            wandb_run=wandb_run,
-        )
-        args.epochs = original_epochs
 
     attach_last_encoder_attention_capture(model)
     model.eval()
 
     src = select_probe_german_sentence(test_loader, model, args)
     src = src.to(args.device_resolved)
+    if args.verbose_head:
+        print(f"[head_specialization] Device={args.device_resolved}")
+        print(f"[head_specialization] Input token ids: {src[0].detach().cpu().tolist()}")
     src_mask = make_src_mask(src)
     with torch.no_grad():
         _ = model.encode(src, src_mask)
@@ -425,6 +439,13 @@ def experiment_head_specialization(args, wandb_run) -> None:
     src_tokens = [src_vocab.lookup_token(i) if i < len(src_vocab.itos) else "<unk>" for i in src_ids]
     src_labels = positional_labels(src_tokens)
     self_attn = self_attn[:, : len(src_tokens), : len(src_tokens)]
+    wandb_run.summary["head_specialization/source_sentence"] = " ".join(src_tokens)
+    wandb_run.summary["head_specialization/num_tokens"] = int(len(src_tokens))
+    wandb_run.summary["head_specialization/num_heads"] = int(self_attn.size(0))
+    wandb_run.summary["head_specialization/checkpoint_path"] = ckpt_path
+    if args.verbose_head:
+        print(f"[head_specialization] Source tokens: {src_tokens}")
+        print(f"[head_specialization] Captured attention shape: {tuple(self_attn.shape)}")
 
     for h in range(self_attn.size(0)):
         self_mat = self_attn[h].numpy()
@@ -432,15 +453,35 @@ def experiment_head_specialization(args, wandb_run) -> None:
         self_table = wandb.Table(data=[[v] for v in self_values], columns=["weight"])
         self_hist = wandb.plot.histogram(self_table, value="weight", title=f"Encoder head {h} attention weights")
         wandb_run.log({f"encoder_head_{h}_attn_hist": self_hist})
+        diag = np.diag(self_mat)
+        wandb_run.summary[f"encoder_head_{h}/diag_mean"] = float(np.mean(diag))
+        wandb_run.summary[f"encoder_head_{h}/max_weight"] = float(np.max(self_mat))
+        wandb_run.summary[f"encoder_head_{h}/std"] = float(np.std(self_mat))
         log_attention_heatmap_custom_chart(
             wandb_run=wandb_run,
             key=f"encoder_head_{h}_attn_heatmap",
             matrix=self_mat,
-            x_labels=src_labels,
-            y_labels=src_labels,
+            key_labels=src_labels,
+            query_labels=src_labels,
             vega_spec_name=args.heatmap_spec_name,
             title=f"Encoder self-attn head {h}",
         )
+        log_attention_heatmap_image(
+            wandb_run=wandb_run,
+            key=f"encoder_head_{h}_attn_heatmap_image",
+            matrix=self_mat,
+            key_labels=src_labels,
+            query_labels=src_labels,
+            title=f"Encoder head {h} attention (Query->Key)",
+            annotate_values=args.head_annotate_values,
+        )
+        if args.verbose_head:
+            max_idx = np.unravel_index(np.argmax(self_mat), self_mat.shape)
+            q_idx, k_idx = int(max_idx[0]), int(max_idx[1])
+            print(
+                f"[head_specialization] head={h} max={self_mat[q_idx, k_idx]:.6f} "
+                f"query={src_labels[q_idx]} key={src_labels[k_idx]} diag_mean={float(np.mean(np.diag(self_mat))):.6f}"
+            )
 
 
 def collect_prediction_confidences(model, data_loader, tgt_vocab, device: str, max_batches: int = 20) -> List[float]:
@@ -546,25 +587,67 @@ def log_attention_heatmap_custom_chart(
     wandb_run,
     key: str,
     matrix: np.ndarray,
-    x_labels: List[str],
-    y_labels: List[str],
+    key_labels: List[str],
+    query_labels: List[str],
     vega_spec_name: str,
     title: str,
 ) -> None:
     rows = []
-    for i, y in enumerate(y_labels):
-        for j, x in enumerate(x_labels):
+    for i, query_token in enumerate(query_labels):
+        for j, key_token in enumerate(key_labels):
             val = float(matrix[i, j])
-            rows.append([x, y, val])
+            rows.append([key_token, query_token, val])
 
-    table = wandb.Table(data=rows, columns=["x", "y", "value"])
+    table = wandb.Table(data=rows, columns=["key", "query", "value"])
     chart = wandb.plot_table(
         vega_spec_name=vega_spec_name,
         data_table=table,
-        fields={"x": "x", "y": "y", "value": "value"},
+        fields={"x": "key", "y": "query", "value": "value"},
         string_fields={"title": title},
     )
     wandb_run.log({key: chart})
+
+
+def log_attention_heatmap_image(
+    wandb_run,
+    key: str,
+    matrix: np.ndarray,
+    key_labels: List[str],
+    query_labels: List[str],
+    title: str,
+    annotate_values: bool = False,
+) -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        print(f"[warn] matplotlib unavailable; skipped image heatmap log for {key}: {exc}")
+        return
+
+    h, w = matrix.shape
+    fig_w = max(7.5, 0.6 * w)
+    fig_h = max(6.5, 0.6 * h)
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    im = ax.imshow(matrix, cmap="viridis", aspect="auto")
+    ax.set_xticks(np.arange(w))
+    ax.set_yticks(np.arange(h))
+    ax.set_xticklabels(key_labels, rotation=60, ha="right", fontsize=9)
+    ax.set_yticklabels(query_labels, fontsize=9)
+    ax.set_xlabel("Key tokens")
+    ax.set_ylabel("Query tokens")
+    ax.set_title(title)
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label("Attention weight")
+
+    if annotate_values:
+        for i in range(h):
+            for j in range(w):
+                v = matrix[i, j]
+                if v >= 0.10:
+                    ax.text(j, i, f"{v:.2f}", ha="center", va="center", color="white", fontsize=7)
+
+    fig.tight_layout()
+    wandb_run.log({key: wandb.Image(fig)})
+    plt.close(fig)
 
 
 def experiment_positional_vs_learned(args, wandb_run) -> None:
@@ -721,6 +804,10 @@ def parse_args():
     parser.add_argument("--head-sentence", type=str, default=None)
     parser.add_argument("--head-words", type=int, default=10)
     parser.add_argument("--head-checkpoint-path", type=str, default="checkpoint.pt")
+    parser.add_argument("--head-ckpt-drive-id", type=str, default=None)
+    parser.add_argument("--head-force-gdrive-download", action="store_true")
+    parser.add_argument("--verbose-head", action="store_true")
+    parser.add_argument("--head-annotate-values", action="store_true")
     parser.add_argument("--head-train-epochs", type=int, default=0)
     parser.add_argument(
         "--heatmap-spec-name",
